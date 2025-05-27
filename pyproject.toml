@@ -1,0 +1,26 @@
+[project]
+name = "phototag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.82.0",
+    "pillow>=11.2.1",
+    "pydantic>=2.11.5",
+    "python-dotenv>=1.1.0",
+    "requests>=2.32.3",
+    "typer>=0.16.0",
+    "rich>=14.0.0",
+    "rawpy>=0.25.0",
+]
+
+[project.scripts]
+phototag = "phototag.cli:app"
+
+[dependency-groups]
+dev = [
+    "black>=25.1.0",
+    "pytest>=8.3.5",
+    "ruff>=0.11.11",
+]
