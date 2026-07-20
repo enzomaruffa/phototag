@@ -29,7 +29,6 @@ class ImmichUploader:
 
         self.local_port = local_port
         self.immich_url = f"http://localhost:{local_port}"
-        self.tunnel_process: Optional[subprocess.Popen] = None
         self.tunnel_was_existing = False
 
     def start_tunnel(self) -> bool:
@@ -53,37 +52,28 @@ class ImmichUploader:
             ]
 
             logging.info(f"Starting SSH tunnel with command: {' '.join(cmd)}")
-            self.tunnel_process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-            )
-
-            # Give tunnel time to establish
-            time.sleep(3)
-
-            # Check if process exited with error
-            if self.tunnel_process.poll() is not None:
-                stdout, stderr = self.tunnel_process.communicate()
-                if stderr:
-                    logging.error(f"SSH tunnel stderr: {stderr.strip()}")
-                if stdout:
-                    logging.info(f"SSH tunnel stdout: {stdout.strip()}")
-                logging.error("SSH tunnel process exited unexpectedly")
+            # With -f, ssh authenticates, forks the tunnel into the background,
+            # and the parent exits 0. A non-zero exit is the only real failure -
+            # treating the parent's exit as a crash breaks on fast connections.
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                logging.error(
+                    f"SSH tunnel failed (exit {result.returncode}): {result.stderr.strip()}"
+                )
                 return False
 
-            # Test connection
-            if self.test_connection():
-                logging.info(f"SSH tunnel established to {self.ssh_target}")
-                self.tunnel_was_existing = False
-                return True
-            else:
-                # If connection test fails, get any error output
-                if self.tunnel_process and self.tunnel_process.poll() is not None:
-                    stdout, stderr = self.tunnel_process.communicate()
-                    if stderr:
-                        logging.error(f"SSH tunnel stderr: {stderr.strip()}")
-                logging.error("SSH tunnel failed to establish - connection test failed")
-                self.stop_tunnel()
-                return False
+            self.tunnel_was_existing = False
+
+            # Wait for the forwarded port to become usable
+            for _ in range(10):
+                if self.test_connection():
+                    logging.info(f"SSH tunnel established to {self.ssh_target}")
+                    return True
+                time.sleep(1)
+
+            logging.error("SSH tunnel forked but Immich is not responding through it")
+            self.stop_tunnel()
+            return False
 
         except Exception as e:
             logging.error(f"Failed to start SSH tunnel: {e}")
@@ -96,12 +86,7 @@ class ImmichUploader:
             logging.info("Not stopping tunnel - it was already running when we started")
             return
 
-        if self.tunnel_process:
-            self.tunnel_process.terminate()
-            self.tunnel_process.wait()
-            self.tunnel_process = None
-
-        # Also kill any lingering SSH processes (only if we created the tunnel)
+        # ssh -f forks away from us, so kill by port-forward pattern
         try:
             subprocess.run(
                 ["pkill", "-f", f"ssh.*{self.local_port}:localhost:2283"], check=False
