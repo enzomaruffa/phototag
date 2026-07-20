@@ -202,12 +202,11 @@ def process(
             progress_callback=update_progress
         )
     
-    # Show final results
+    # Show final results (scoped to this run - not all-time database totals)
     console.print("\n🎯 Processing Complete!")
-    
-    # Get fresh state database instance for final stats
+
     final_state_db = ProcessingStateDB()
-    final_stats = final_state_db.get_statistics()
+    final_stats = final_state_db.get_statistics(since=results.get('started_at'))
     console.print(create_progress_display(final_stats))
     
     if results['interrupted'] > 0:
@@ -224,7 +223,7 @@ def process(
     
     # Show failed photos if any
     if final_stats.get(PhotoStatus.FAILED.value, 0) > 0:
-        console.print(f"\n❌ {final_stats[PhotoStatus.FAILED.value]} photos failed. Run 'phototag status --failed' to see details.", style="red")
+        console.print(f"\n❌ {final_stats[PhotoStatus.FAILED.value]} photos failed. Run 'phototag status --failed' for details, then 'phototag retry' to re-queue them.", style="red")
 
 
 @app.command()
@@ -553,6 +552,81 @@ def reset_stuck():
         count = state_db.unlock_stuck_photos()
         console.print(f"✅ Reset {count} photos to pending status")
         console.print("Run 'phototag process --continue' to resume processing")
+
+
+@app.command()
+def retry():
+    """Re-queue failed photos so the next 'phototag process' run picks them up."""
+    state_db = ProcessingStateDB()
+
+    failed_photos = state_db.get_failed_photos()
+    if not failed_photos:
+        console.print("✅ No failed photos to retry")
+        return
+
+    reset_count = 0
+    missing_count = 0
+    for photo in failed_photos:
+        if Path(photo['filepath']).exists():
+            state_db.reset_photo(photo['filepath'])
+            reset_count += 1
+        else:
+            missing_count += 1
+
+    console.print(f"🔄 Re-queued {reset_count} failed photos")
+    if missing_count:
+        console.print(f"⚠️  Skipped {missing_count} whose files no longer exist (run 'phototag doctor' to clean them up)", style="yellow")
+    console.print("Run 'phototag process' to process them")
+
+
+@app.command()
+def doctor():
+    """Reconcile the state database with what's actually on disk."""
+    state_db = ProcessingStateDB()
+    processed_dir = Path(os.getenv("PROCESSED_DIR", "./processed"))
+
+    stuck_statuses = set(ProcessingStateDB.STUCK_STATUSES)
+    reset_count = 0
+    marked_processed = 0
+    deleted = 0
+
+    for photo in state_db.get_all_photos():
+        filepath = photo['filepath']
+        status = photo['status']
+
+        if status == PhotoStatus.PROCESSED.value:
+            continue
+
+        if Path(filepath).exists():
+            # File is still in the inbox; unstick it if a worker died mid-pipeline
+            if status in stuck_statuses:
+                state_db.reset_photo(filepath)
+                reset_count += 1
+        else:
+            # File is gone from the inbox
+            if (processed_dir / Path(filepath).name).exists():
+                # It made it to processed but the database never heard about it
+                state_db.update_photo_status(
+                    filepath,
+                    PhotoStatus.PROCESSED,
+                    {'moved_to': str(processed_dir / Path(filepath).name)}
+                )
+                marked_processed += 1
+            else:
+                # Orphaned record - file was moved or deleted outside phototag
+                state_db.delete_photo(filepath)
+                deleted += 1
+
+    if not (reset_count or marked_processed or deleted):
+        console.print("✅ Database and disk are in sync - nothing to fix")
+        return
+
+    if reset_count:
+        console.print(f"🔄 Reset {reset_count} stuck photos to pending")
+    if marked_processed:
+        console.print(f"✅ Marked {marked_processed} photos as processed (found in processed dir)")
+    if deleted:
+        console.print(f"🗑️  Removed {deleted} orphaned records (files no longer exist)")
 
 
 @app.command()

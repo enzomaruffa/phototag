@@ -7,8 +7,8 @@ import shutil
 import json
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Callable
-from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime, timezone
+from concurrent.futures import ProcessPoolExecutor, wait
 import multiprocessing
 import asyncio
 
@@ -317,7 +317,10 @@ class PhotoProcessor:
             'failed': 0,
             'interrupted': 0
         }
-        
+        # UTC to match sqlite's CURRENT_TIMESTAMP; used to scope stats to this run
+        run_started_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        results['started_at'] = run_started_utc
+
         with ProcessPoolExecutor(max_workers=self.worker_count) as executor:
             # Submit initial workers - pass only serializable data
             futures = []
@@ -332,26 +335,26 @@ class PhotoProcessor:
                     force_process
                 )
                 futures.append(future)
-            
-            # Monitor progress
+
+            # Monitor progress: poll every couple of seconds so the progress
+            # callback updates live instead of only when a worker exits
             try:
-                for future in as_completed(futures):
-                    if self._shutdown_requested:
-                        break
-                    
-                    try:
-                        worker_results = future.result()
-                        for key in results:
-                            if key in worker_results:
-                                results[key] += worker_results[key]
-                        
-                        if progress_callback:
-                            stats = state_db.get_statistics()
-                            progress_callback(stats)
-                            
-                    except Exception as e:
-                        logger.error(f"Worker failed: {e}")
-                
+                pending = set(futures)
+                while pending and not self._shutdown_requested:
+                    done, pending = wait(pending, timeout=2)
+
+                    for future in done:
+                        try:
+                            worker_results = future.result()
+                            for key in results:
+                                if key in worker_results:
+                                    results[key] += worker_results[key]
+                        except Exception as e:
+                            logger.error(f"Worker failed: {e}")
+
+                    if progress_callback:
+                        progress_callback(state_db.get_statistics(since=run_started_utc))
+
             except KeyboardInterrupt:
                 logger.info("Graceful shutdown requested...")
                 self._shutdown_requested = True

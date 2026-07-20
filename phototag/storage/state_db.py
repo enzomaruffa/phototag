@@ -218,16 +218,29 @@ class ProcessingStateDB:
         """, (PhotoStatus.LOCKED.value, cutoff))
         return [row['filepath'] for row in result]
     
+    # Mid-pipeline states a crashed/killed worker can leave behind. Resetting them
+    # to pending is safe: saved AI analysis is reused and EXIF writes are idempotent.
+    STUCK_STATUSES = (
+        PhotoStatus.LOCKED.value,
+        PhotoStatus.AI_ANALYZING.value,
+        PhotoStatus.AI_ANALYZED.value,
+        PhotoStatus.EXIF_WRITING.value,
+        PhotoStatus.EXIF_WRITTEN.value,
+        PhotoStatus.MOVING.value,
+    )
+
     def unlock_stuck_photos(self, timeout_minutes: int = 5) -> int:
-        """Reset photos that have been locked too long."""
+        """Reset photos that have been stuck mid-pipeline for too long."""
         with self.transaction() as conn:
             cutoff = datetime.now() - timedelta(minutes=timeout_minutes)
-            result = conn.execute("""
-                UPDATE photos 
+            placeholders = ','.join('?' * len(self.STUCK_STATUSES))
+            result = conn.execute(f"""
+                UPDATE photos
                 SET status = ?, worker_id = NULL, locked_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE status = ? AND locked_at < ?
-            """, (PhotoStatus.PENDING.value, PhotoStatus.LOCKED.value, cutoff))
+                WHERE status IN ({placeholders})
+                  AND (locked_at < ? OR locked_at IS NULL)
+            """, (PhotoStatus.PENDING.value, *self.STUCK_STATUSES, cutoff))
             return result.rowcount
     
     def get_photos_awaiting_tags(self, tags: List[str]) -> List[str]:
@@ -293,28 +306,28 @@ class ProcessingStateDB:
         
         return resumable
     
-    def get_statistics(self) -> Dict[str, int]:
-        """Get processing statistics."""
+    def get_statistics(self, since: Optional[str] = None) -> Dict[str, int]:
+        """Get processing statistics, optionally scoped to rows touched after a UTC timestamp."""
         conn = self._get_connection()
         stats = {}
-        
-        result = conn.execute("""
-            SELECT status, COUNT(*) as count 
-            FROM photos 
-            GROUP BY status
-        """)
-        
+
+        if since:
+            result = conn.execute("""
+                SELECT status, COUNT(*) as count
+                FROM photos
+                WHERE updated_at >= ?
+                GROUP BY status
+            """, (since,))
+        else:
+            result = conn.execute("""
+                SELECT status, COUNT(*) as count
+                FROM photos
+                GROUP BY status
+            """)
+
         for row in result:
             stats[row['status']] = row['count']
-        
-        # Add failed with retry exhausted
-        result = conn.execute("""
-            SELECT COUNT(*) as count 
-            FROM photos 
-            WHERE status = ? AND retry_count >= 3
-        """, (PhotoStatus.FAILED.value,))
-        stats['permanently_failed'] = result.fetchone()['count']
-        
+
         return stats
     
     def get_failed_photos(self) -> List[Dict]:
@@ -371,10 +384,37 @@ class ProcessingStateDB:
             return result.rowcount
     
     def reset_photo(self, filepath: str) -> bool:
-        """Reset a photo to pending state."""
-        return self.update_photo_status(filepath, PhotoStatus.PENDING, 
-                                       {'error': None})
-    
+        """Reset a photo to pending, clearing errors but keeping any saved AI analysis."""
+        try:
+            with self.transaction() as conn:
+                conn.execute("""
+                    UPDATE photos
+                    SET status = ?, worker_id = NULL, locked_at = NULL,
+                        error_message = NULL, error_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE filepath = ?
+                """, (PhotoStatus.PENDING.value, filepath))
+                return conn.total_changes > 0
+        except sqlite3.Error as e:
+            logger.error(f"Failed to reset photo {filepath}: {e}")
+            return False
+
+    def get_all_photos(self) -> List[Dict]:
+        """Get filepath and status for every tracked photo."""
+        conn = self._get_connection()
+        result = conn.execute("SELECT filepath, status FROM photos")
+        return [dict(row) for row in result]
+
+    def delete_photo(self, filepath: str) -> bool:
+        """Remove a photo record entirely."""
+        try:
+            with self.transaction() as conn:
+                conn.execute("DELETE FROM photos WHERE filepath = ?", (filepath,))
+                return conn.total_changes > 0
+        except sqlite3.Error as e:
+            logger.error(f"Failed to delete photo record {filepath}: {e}")
+            return False
+
     def close(self):
         """Close database connection."""
         if hasattr(self._local, 'connection'):
