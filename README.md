@@ -1,13 +1,14 @@
 # PhotoTag
 
-AI-powered photo tagging and upload pipeline for Immich. Analyzes photos with OpenAI vision models, embeds ratings/tags/descriptions into EXIF, and uploads everything to your Immich server. Videos flow through the same pipeline without AI analysis.
+AI-powered photo tagging and upload pipeline for Immich. Analyzes photos with OpenAI vision models, embeds ratings/tags/descriptions into EXIF, and uploads everything to your Immich server. Videos flow through the same pipeline without AI analysis. Duplicates never enter the pipeline at all — they're detected by content hash at intake and diverted straight to the outbox.
 
 ```
-inbox/ ──▶ [AI analysis + EXIF] ──▶ processed/ ──▶ [Immich upload] ──▶ outbox/
-              (videos skip AI          │
-               and move straight       ▼
-               through)          [state database]
-                                 (resume anywhere)
+inbox/ ──▶ [dedup check] ──▶ [AI analysis + EXIF] ──▶ processed/ ──▶ [Immich upload] ──▶ outbox/
+                │               (videos skip AI          │
+                │ duplicate      and move straight       ▼
+                │ content        through)          [state database]
+                ▼                                  (resume anywhere)
+             outbox/  (already uploaded — skip AI cost and re-upload)
 ```
 
 ## Quick start
@@ -31,6 +32,7 @@ make upload           # upload processed/ to Immich, move to outbox/
 | `make retry` | Re-queue failed photos and process them again |
 | `make review` | Review pending AI-suggested tags (bulk approve/reject or one-by-one) |
 | `make upload` | Upload to Immich (`ALBUM="Trip 2026"` optional) |
+| `make sync-hashes` | Pull Immich asset checksums so duplicates from any client are caught |
 | `make status` | Show processing status |
 | `make failed` | Show failed photo details |
 | `make doctor` | Fix database/disk drift (stuck or orphaned records) |
@@ -55,6 +57,7 @@ Set in `.env` (see `.env.example`):
 | `INBOX_DIR` / `PROCESSED_DIR` / `OUTBOX_DIR` | Pipeline directories (default `./inbox`, `./processed`, `./outbox`) |
 | `IMMICH_SSH_CONFIG_NAME` | SSH config entry for the Immich server tunnel |
 | `IMMICH_SERVER_HOST` + `IMMICH_SERVER_USER` | Alternative to the SSH config entry |
+| `IMMICH_API_KEY` | Only needed for `phototag immich-sync` (create under Immich Account Settings → API Keys) |
 
 `phototag config` shows what's set and what's missing.
 
@@ -68,6 +71,20 @@ Each photo moves through tracked states in a SQLite database (`.phototag/process
 4. **Move** — the file lands in `processed/`, ready for upload.
 
 **Videos** are detected by extension and go straight from step 0 to step 4 — no AI, no EXIF, just tracked and moved so they ride along to Immich with everything else.
+
+### Duplicate detection
+
+Every file is hashed (SHA-256) at intake, **before** the EXIF write mutates its bytes — the original content is the only stable identity a photo keeps across re-syncs. An incoming file whose content matches an already-tracked photo skips the whole pipeline and moves straight to `outbox/`: no AI cost, no re-upload, no duplicate in Immich. This catches:
+
+- **The same photo re-delivered by a sync tool** (Syncthing/Dropbox re-drops), whether under its old name or a new one.
+- **Copies within a batch** — two identical files in the inbox; one is processed, the other diverted.
+- **A different photo re-using an old name** is the opposite case: it's detected by hash mismatch and processed as a new photo instead of being silently skipped.
+
+Immich's own server-side checksum dedup can't help here: the EXIF write changes the uploaded bytes, so a re-synced original never matches what the server has. The local hash memory is what makes this work.
+
+**`make sync-hashes`** (`phototag immich-sync`) extends dedup to photos that reached Immich through *other* clients (phone app, web upload). It mirrors the server's asset checksums (SHA-1) into the local database; intake then checks incoming files against that set too. Run it from time to time — it needs `IMMICH_API_KEY` set. `phototag status` shows how many checksums are mirrored and when they were last synced.
+
+Caveats: detection is exact-content only (a re-encoded or resized copy won't match), photos processed before this feature have no stored hash, and `phototag db-clean` forgets the hashes of the records it deletes.
 
 ### Sync-tool safety
 
@@ -102,6 +119,8 @@ with `IMMICH_SSH_CONFIG_NAME=my-immich-server` in `.env`. The uploader opens a t
 
 ```bash
 uv sync --group dev
-make fmt    # black
-make lint   # ruff
+make fmt        # ruff format
+make lint       # ruff check
+make typecheck  # ty
+make check      # lint + typecheck + format check
 ```
