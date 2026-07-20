@@ -386,7 +386,11 @@ def upload(
 
 
 @app.command()
-def review_tags():
+def review_tags(
+    approve_all: bool = typer.Option(
+        False, "--approve-all", "-a", help="Approve every pending tag without prompting"
+    ),
+):
     """Review and approve/reject pending tags."""
     tag_storage = TagReviewStorage()
     exif_handler = EXIFHandler()
@@ -411,36 +415,60 @@ def review_tags():
 
     console.print(table)
 
-    # Interactive approval
+    # Approval: bulk or one-by-one
     approved_tags = []
     rejected_tags = []
 
-    for tag in pending_tags:
-        choice = Prompt.ask(
-            f"Approve tag '{tag.name}'?", choices=["y", "n", "q"], default="y"
+    if approve_all:
+        approved_tags = [tag.name for tag in pending_tags]
+    else:
+        mode = Prompt.ask(
+            f"Review {len(pending_tags)} tags",
+            choices=["all", "none", "each", "quit"],
+            default="each",
         )
-
-        if choice == "q":
-            break
-        elif choice == "y":
-            approved_tags.append(tag.name)
+        if mode == "quit":
+            return
+        elif mode == "all":
+            approved_tags = [tag.name for tag in pending_tags]
+        elif mode == "none":
+            rejected_tags = [tag.name for tag in pending_tags]
         else:
-            rejected_tags.append(tag.name)
+            for tag in pending_tags:
+                choice = Prompt.ask(
+                    f"Approve tag '{tag.name}'?", choices=["y", "n", "q"], default="y"
+                )
+
+                if choice == "q":
+                    break
+                elif choice == "y":
+                    approved_tags.append(tag.name)
+                else:
+                    rejected_tags.append(tag.name)
 
     # Apply decisions
     if approved_tags:
         console.print(f"✅ Approving {len(approved_tags)} tags...")
-        photos_to_update = tag_storage.approve_tags(approved_tags)
+        tag_storage.approve_tags(approved_tags)
 
-        # Update EXIF data with approved tags for photos in inbox
-        for photo_path in photos_to_update:
+        # Backfill EXIF for every photo whose AI analysis wanted these tags,
+        # at the photo's CURRENT location (they've usually moved to processed/)
+        state_db = ProcessingStateDB()
+        photos_needing = state_db.get_photos_needing_tags(approved_tags)
+
+        updated = 0
+        gone = 0
+        for photo_path, tags_for_photo in photos_needing.items():
             photo_file = Path(photo_path)
             if photo_file.exists():
-                # Get which approved tags apply to this photo
-                relevant_tags = [tag for tag in approved_tags]  # Simplified for now
-                exif_handler.update_exif_tags(photo_file, relevant_tags)
+                if exif_handler.update_exif_tags(photo_file, tags_for_photo):
+                    updated += 1
+            else:
+                gone += 1
 
-        console.print(f"📝 Updated {len(photos_to_update)} photos with EXIF metadata")
+        console.print(f"📝 Backfilled tags into {updated} photos")
+        if gone:
+            console.print(f"⚠️  {gone} photos no longer on disk (already uploaded?) - skipped", style="yellow")
         
         # Check for photos that were waiting for these tags to be approved
         console.print("\n🔍 Checking for photos awaiting these tags...")

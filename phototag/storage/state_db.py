@@ -399,6 +399,31 @@ class ProcessingStateDB:
             logger.error(f"Failed to reset photo {filepath}: {e}")
             return False
 
+    def get_photos_needing_tags(self, tags: List[str]) -> Dict[str, List[str]]:
+        """Map each photo's CURRENT file location to the subset of `tags` its AI analysis wanted.
+
+        Uses moved_to_path when the photo has already been moved to processed/,
+        so tag backfill works after files leave the inbox.
+        """
+        conn = self._get_connection()
+        result = conn.execute("""
+            SELECT filepath, moved_to_path, ai_response_json
+            FROM photos
+            WHERE ai_response_json IS NOT NULL
+        """)
+
+        photos = {}
+        for row in result:
+            try:
+                needed = json.loads(row['ai_response_json']).get('new_tags_needed', [])
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            matching = [t for t in tags if t in needed]
+            if matching:
+                photos[row['moved_to_path'] or row['filepath']] = matching
+
+        return photos
+
     def get_all_photos(self) -> List[Dict]:
         """Get filepath and status for every tracked photo."""
         conn = self._get_connection()
