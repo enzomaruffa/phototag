@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-phototag = "phototag.cli:app"
+phototag = "main:app"
 
 [dependency-groups]
 dev = [

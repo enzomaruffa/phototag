@@ -68,6 +68,8 @@ Provide a detailed description of what you see in the image.
 
 Be AGGRESSIVE with tagging - aim to include at least one tag per major category when appropriate (subject, lighting, composition, quality, etc.). Better to over-tag than under-tag.
 
+CRITICAL: Maximize use of existing_tags_used and minimize new_tags_needed. Always prefer reusing an existing tag (even if slightly imperfect) over creating a new one. Only create new tags for genuinely unique concepts not covered by any existing tag.
+
 Return JSON only, no other text:
 {
     "rating": 4,
@@ -89,11 +91,21 @@ Composition: {', '.join(categories.get('composition', []))}
 Quality: {', '.join(categories.get('quality', []))}
 Other: {', '.join(categories.get('other', []))}
 
-IMPORTANT: 
+IMPORTANT TAGGING RULES:
 - These tags include both approved and pending tags - use any that apply
-- Be aggressive with tagging - use multiple existing tags when they fit
-- Only suggest new tags if the concept is completely missing from available tags
+- Be EXTREMELY aggressive with reusing existing tags - prefer existing over new
+- ALWAYS check for similar/related concepts before suggesting new tags
+- Only suggest new tags if NO existing tag covers the concept (even partially)
+- Better to use an imperfect existing tag than create a new one
 - Aim for comprehensive tagging covering subject, lighting, composition, and quality aspects
+
+EXAMPLES OF TAG REUSE (prefer existing):
+- If 'casual' exists, don't create 'informal' or 'relaxed'
+- If 'group' exists, don't create 'multiple_people' or 'crowd'
+- If 'blur' exists, don't create 'blurry' or 'out_of_focus'  
+- If 'indoor' exists, don't create 'inside' or 'interior'
+- If 'celebration' exists, don't create 'party' or 'festive'
+- If 'portrait' exists, don't create 'headshot' or 'face'
 """
             return context + base_prompt
 

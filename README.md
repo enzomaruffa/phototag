@@ -7,10 +7,12 @@ AI-powered photo tagging and upload system for Immich. Automatically analyzes ph
 - **AI-Powered Analysis**: Uses OpenAI GPT-4 Vision to analyze photo content, subjects, and quality
 - **EXIF Metadata Embedding**: Adds descriptions, tags, and ratings directly to photo files
 - **Smart Tag Management**: Learns from your existing tags and suggests new ones for review
-- **Workflow Management**: Organized inbox � processed � outbox workflow
+- **Workflow Management**: Organized inbox → processed → outbox workflow
 - **Immich Integration**: Direct upload to Immich via SSH tunnel
 - **RAW Support**: Handles RAW files (ARW, CR2, NEF, DNG) and standard formats
-- **Batch Processing**: Efficient parallel processing with resume capability
+- **Resumable Processing**: Full state tracking - interrupt anytime and resume exactly where you left off
+- **Parallel Processing**: Process multiple photos simultaneously with configurable worker count
+- **Automatic Recovery**: Detects and recovers from stuck or failed photos
 
 ## Installation
 
@@ -87,6 +89,60 @@ AI-powered photo tagging and upload system for Immich. Automatically analyzes ph
    phototag upload --album "My Photos"
    ```
 
+## Resumption & Recovery Features
+
+### Interrupt-Safe Processing
+
+PhotoTag saves its state after every processing step:
+1. **AI Analysis** - Saved immediately after completion
+2. **Tag Check** - Tracks which tags need approval
+3. **EXIF Writing** - Confirms metadata was written
+4. **File Move** - Records final location
+
+You can safely interrupt processing at any time with Ctrl+C and resume later:
+
+```bash
+# Start processing
+phototag process --workers 4
+# Press Ctrl+C to interrupt safely
+
+# Resume where you left off
+phototag process --continue
+```
+
+### Processing Status
+
+Check the current state of all photos:
+
+```bash
+# Show overall statistics
+phototag status
+
+# Show details of failed photos
+phototag status --failed
+
+# Show photos waiting for tag approval
+phototag status --awaiting-tags
+```
+
+### Recovery Commands
+
+Handle stuck or failed photos:
+
+```bash
+# Reset photos stuck in processing
+phototag reset-stuck
+
+# Retry failed photos
+phototag process --retry-failed
+
+# Show database statistics
+phototag db-stats
+
+# Clean old processed records (>30 days)
+phototag db-clean --days 30
+```
+
 ## Commands
 
 ### `phototag process`
@@ -97,16 +153,20 @@ Analyzes photos with AI and embeds metadata into EXIF data.
 phototag process [OPTIONS] [INBOX_DIR]
 
 Options:
-  -p, --parallel INTEGER    Number of parallel AI analyses (default: 1)
-  --skip-existing BOOL     Skip photos with existing EXIF metadata (default: True)
+  -w, --workers INTEGER    Number of parallel workers (default: 2, max: CPU count)
+  --skip-existing         Skip photos already processed (default: True)
+  -c, --continue          Continue from previous interrupted session
+  --retry-failed          Retry previously failed photos
 ```
 
 **What it does:**
 - Analyzes each photo for content, subjects, and quality
 - Generates descriptions and suggests tags
 - Embeds approved tags and metadata into EXIF data
-- Moves processed photos to `processed/` directory
+- Saves state after every processing step for perfect resumption
+- Moves processed photos to `processed/` directory atomically
 - Saves new tag suggestions for review
+- Supports graceful interruption with Ctrl+C
 
 ### `phototag review-tags`
 
@@ -120,6 +180,7 @@ phototag review-tags
 - Shows table of pending tags with confidence scores
 - Interactive approval/rejection
 - Updates EXIF data for approved tags
+- **Auto-completes** photos that were waiting for approved tags
 - Learns from your decisions for future suggestions
 
 ### `phototag upload`
@@ -158,6 +219,21 @@ The typical workflow involves three directories:
 
 ```
 Photos -> Inbox -> [AI Analysis] -> Processed -> [Upload] -> Outbox
+                         ↓
+                  [State Database]
+                   (Resume from any point)
+```
+
+### Parallel Processing
+
+Process multiple photos simultaneously for faster throughput:
+
+```bash
+# Use 4 workers for faster processing
+phototag process --workers 4
+
+# Monitor progress with status in another terminal
+watch phototag status
 ```
 
 ## AI Analysis

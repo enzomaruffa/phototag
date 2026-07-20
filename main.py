@@ -4,20 +4,29 @@ import asyncio
 import os
 import logging
 import shutil
+import signal
+import sys
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
+import multiprocessing
 
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.prompt import Confirm, Prompt
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.live import Live
+from rich.layout import Layout
+from rich.panel import Panel
 from dotenv import load_dotenv
 
 from phototag.ai.openai_service import OpenAIService
 from phototag.storage.tag_review import TagReviewStorage
 from phototag.storage.exif import EXIFHandler
 from phototag.storage.immich import ImmichUploader
+from phototag.storage.state_db import ProcessingStateDB, PhotoStatus
+from phototag.processing.photo_processor_fixed import PhotoProcessor
 from phototag.models.ai import ProcessedPhoto
 
 # Load environment variables
@@ -81,24 +90,35 @@ def process(
     inbox_dir: Optional[Path] = typer.Argument(
         None, help="Directory containing photos to process (defaults to INBOX_DIR)"
     ),
-    parallel: int = typer.Option(
-        1, "--parallel", "-p", help="Number of parallel AI analyses"
+    workers: int = typer.Option(
+        2, "--workers", "-w", help="Number of parallel workers (default: 2, max: CPU count)"
     ),
     skip_existing: bool = typer.Option(
-        True, "--skip-existing", help="Skip photos with existing EXIF metadata"
+        True, "--skip-existing", help="Skip photos already processed"
+    ),
+    continue_session: bool = typer.Option(
+        False, "--continue", "-c", help="Continue from previous interrupted session"
+    ),
+    retry_failed: bool = typer.Option(
+        False, "--retry-failed", help="Retry previously failed photos"
     ),
 ):
-    """Process photos with AI analysis and embed EXIF metadata."""
+    """Process photos with AI analysis and embed EXIF metadata with resumption support."""
 
-    # Get directory environment variable
+    # Get directory environment variables
     default_inbox = os.getenv("INBOX_DIR", "./inbox")
+    default_processed = os.getenv("PROCESSED_DIR", "./processed")
 
     # Use provided directory or default
     if inbox_dir is None:
         inbox_dir = Path(default_inbox)
+    
+    processed_dir = Path(default_processed)
+    processed_dir.mkdir(parents=True, exist_ok=True)
 
     # Log directory usage
     console.print(f"📁 Processing photos in: {inbox_dir.absolute()}")
+    console.print(f"📦 Will move processed to: {processed_dir.absolute()}")
 
     # Validate environment
     api_key = os.getenv("OPENAI_API_KEY")
@@ -109,100 +129,125 @@ def process(
     if not inbox_dir.exists():
         console.print(f"❌ Directory not found: {inbox_dir}", style="red")
         raise typer.Exit(1)
+    
+    # Validate worker count
+    max_workers = multiprocessing.cpu_count()
+    if workers > max_workers:
+        console.print(f"⚠️  Limiting workers to CPU count: {max_workers}", style="yellow")
+        workers = max_workers
 
-    # Initialize services
-    ai_service = OpenAIService(api_key)
-    tag_storage = TagReviewStorage()
-    exif_handler = EXIFHandler()
-
-    # Get existing tags from approved and pending lists for AI context
-    existing_tags = tag_storage.get_all_available_tags()
-    approved_count = len(tag_storage.get_approved_tag_names())
-    pending_count = len(tag_storage.get_pending_tag_names())
-    console.print(
-        f"📋 Found {approved_count} approved + {pending_count} pending tags for AI context"
-    )
-
+    # Check for resumable session
+    if continue_session:
+        state_db = ProcessingStateDB()
+        resumable = state_db.get_resumable_photos()
+        total_resumable = sum(len(photos) for photos in resumable.values())
+        
+        if total_resumable > 0:
+            console.print(f"🔄 Found {total_resumable} photos to resume from previous session:")
+            for status, photos in resumable.items():
+                if photos:
+                    console.print(f"  • {status}: {len(photos)} photos")
+        else:
+            console.print("ℹ️  No incomplete photos found from previous sessions")
+            continue_session = False
+    
     # Find photos to process
     photo_files = get_photo_files(inbox_dir)
-    # Skip files that already have EXIF metadata with description (simple check)
-    if skip_existing:
-        filtered_files = []
-        for f in photo_files:
-            metadata = exif_handler.read_exif_metadata(f)
-            if not metadata or not metadata.get("description", "").strip():
-                filtered_files.append(f)
-        photo_files = filtered_files
-
-    console.print(f"📸 Found {len(photo_files)} photos to process")
-
-    if not photo_files:
+    console.print(f"📸 Found {len(photo_files)} total photos in inbox")
+    
+    if not photo_files and not continue_session:
         console.print("✅ No photos to process")
         return
 
-    # Process photos
-    async def process_photos():
-        for photo_path in photo_files:
-            try:
-                console.print(f"🤖 Analyzing {photo_path.name}...")
-
-                # AI analysis with both approved and pending tags for context
-                analysis = await ai_service.analyze_photo(photo_path, existing_tags)
-
-                # Only use approved tags for EXIF creation (pending tags need review first)
-                approved_tag_names = tag_storage.get_approved_tag_names()
-                approved_tags_used = [
-                    tag
-                    for tag in analysis.existing_tags_used
-                    if tag in approved_tag_names
-                ]
-
-                exif_handler.add_exif_metadata(
-                    photo_path,
-                    analysis.rating,
-                    approved_tags_used,
-                    analysis.description,
-                    analysis.notes,
-                )
-
-                # Store new pending tags for review (avoid duplicates with existing pending/approved)
-                current_pending_tags = tag_storage.get_pending_tag_names()
-                for new_tag in analysis.new_tags_needed:
-                    if (
-                        new_tag not in approved_tag_names
-                        and new_tag not in current_pending_tags
-                    ):
-                        tag_storage.add_pending_tag(
-                            new_tag, str(photo_path), analysis.confidence
-                        )
-
-                console.print(
-                    f"✅ Processed {photo_path.name} (Rating: {analysis.rating}/5)"
-                )
-
-            except Exception as e:
-                console.print(
-                    f"❌ Failed to process {photo_path.name}: {e}", style="red"
-                )
-
-    # Run processing
-    asyncio.run(process_photos())
-
-    # Move processed photos to intermediate folder
-    if photo_files:
-        processed_dir = Path(os.getenv("PROCESSED_DIR", "./processed"))
-        processed_dir.mkdir(parents=True, exist_ok=True)
-        console.print(f"📦 Moving processed photos to: {processed_dir}")
-        moved_count = move_photos(photo_files, processed_dir)
-        console.print(f"✅ Moved {moved_count} processed photos")
-
+    # Initialize processor
+    processor = PhotoProcessor(
+        api_key=api_key,
+        inbox_dir=inbox_dir,
+        processed_dir=processed_dir,
+        worker_count=workers
+    )
+    
+    # Setup progress display
+    def create_progress_display(stats: Dict[str, int]):
+        """Create a rich progress display for processing."""
+        table = Table(title="Processing Status", show_header=True)
+        table.add_column("Status", style="cyan")
+        table.add_column("Count", justify="right")
+        
+        status_emojis = {
+            PhotoStatus.PENDING.value: "🕰️",
+            PhotoStatus.AI_ANALYZING.value: "🤖",
+            PhotoStatus.AWAITING_TAG_REVIEW.value: "🏷️",
+            PhotoStatus.PROCESSED.value: "✅",
+            PhotoStatus.FAILED.value: "❌"
+        }
+        
+        for status, count in stats.items():
+            if count > 0:
+                emoji = status_emojis.get(status, "📎")
+                table.add_row(f"{emoji} {status}", str(count))
+        
+        return table
+    
+    # Process with progress tracking
+    console.print(f"\n🚀 Starting processing with {workers} workers...")
+    console.print("Press Ctrl+C to safely interrupt\n")
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console
+    ) as progress:
+        task = progress.add_task(
+            f"Processing photos with {workers} workers...",
+            total=None  # Indeterminate progress
+        )
+        
+        def update_progress(stats):
+            total = sum(stats.values())
+            processed = stats.get(PhotoStatus.PROCESSED.value, 0)
+            failed = stats.get(PhotoStatus.FAILED.value, 0)
+            awaiting = stats.get(PhotoStatus.AWAITING_TAG_REVIEW.value, 0)
+            
+            progress.update(
+                task,
+                description=f"Processed: {processed} | Awaiting tags: {awaiting} | Failed: {failed}"
+            )
+        
+        # Run processing
+        results = processor.process_batch(
+            photo_files,
+            skip_existing=skip_existing,
+            continue_session=continue_session,
+            retry_failed=retry_failed,
+            progress_callback=update_progress
+        )
+    
+    # Show final results
+    console.print("\n🎯 Processing Complete!")
+    
+    # Get fresh state database instance for final stats
+    final_state_db = ProcessingStateDB()
+    final_stats = final_state_db.get_statistics()
+    console.print(create_progress_display(final_stats))
+    
+    if results['interrupted'] > 0:
+        console.print(f"\n⚠️  Processing was interrupted. Run with --continue to resume.", style="yellow")
+    
     # Check for pending tags
+    tag_storage = TagReviewStorage()
     if tag_storage.has_pending_tags():
         pending_count = len(tag_storage.get_pending_tags())
         console.print(
-            f"⚠️  {pending_count} new tags need review before upload", style="yellow"
+            f"\n🏷️  {pending_count} new tags need review", style="yellow"
         )
         console.print("Run 'phototag review-tags' to approve/reject new tags")
+    
+    # Show failed photos if any
+    if final_stats.get(PhotoStatus.FAILED.value, 0) > 0:
+        console.print(f"\n❌ {final_stats[PhotoStatus.FAILED.value]} photos failed. Run 'phototag status --failed' to see details.", style="red")
 
 
 @app.command()
@@ -356,7 +401,7 @@ def review_tags():
         console.print(f"✅ Approving {len(approved_tags)} tags...")
         photos_to_update = tag_storage.approve_tags(approved_tags)
 
-        # Update EXIF data with approved tags
+        # Update EXIF data with approved tags for photos in inbox
         for photo_path in photos_to_update:
             photo_file = Path(photo_path)
             if photo_file.exists():
@@ -365,6 +410,31 @@ def review_tags():
                 exif_handler.update_exif_tags(photo_file, relevant_tags)
 
         console.print(f"📝 Updated {len(photos_to_update)} photos with EXIF metadata")
+        
+        # Check for photos that were waiting for these tags to be approved
+        console.print("\n🔍 Checking for photos awaiting these tags...")
+        
+        # Get processed directory
+        processed_dir = Path(os.getenv("PROCESSED_DIR", "./processed"))
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Use processor to complete pending photos
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            processor = PhotoProcessor(
+                api_key=api_key,
+                inbox_dir=Path(os.getenv("INBOX_DIR", "./inbox")),
+                processed_dir=processed_dir,
+                worker_count=1
+            )
+            
+            completed = processor.complete_pending_photos(approved_tags)
+            if completed > 0:
+                console.print(f"🎉 Automatically completed {completed} photos that were waiting for these tags!")
+            else:
+                console.print("ℹ️  No photos were waiting for these specific tags")
+        else:
+            console.print("⚠️  Could not check for waiting photos (API key not configured)", style="yellow")
 
     if rejected_tags:
         console.print(f"❌ Rejecting {len(rejected_tags)} tags...")
@@ -375,6 +445,229 @@ def review_tags():
         console.print("🎉 All tags reviewed! Ready for upload.")
     else:
         console.print(f"📋 {remaining} tags still pending")
+
+
+@app.command()
+def status(
+    failed: bool = typer.Option(
+        False, "--failed", "-f", help="Show details of failed photos"
+    ),
+    awaiting_tags: bool = typer.Option(
+        False, "--awaiting-tags", "-t", help="Show photos awaiting tag approval"
+    ),
+):
+    """Show current processing status and statistics."""
+    state_db = ProcessingStateDB()
+    
+    # Get statistics
+    stats = state_db.get_statistics()
+    
+    # Create main status table
+    table = Table(title="📊 Processing Status", show_header=True)
+    table.add_column("Status", style="cyan", width=25)
+    table.add_column("Count", justify="right", style="bold")
+    table.add_column("Description", style="dim")
+    
+    status_info = {
+        PhotoStatus.PENDING.value: ("🕰️ Pending", "Waiting to be processed"),
+        PhotoStatus.LOCKED.value: ("🔒 Locked", "Currently being processed"),
+        PhotoStatus.AI_ANALYZING.value: ("🤖 AI Analyzing", "AI analysis in progress"),
+        PhotoStatus.AI_ANALYZED.value: ("📤 AI Analyzed", "Analysis complete, pending next step"),
+        PhotoStatus.AWAITING_TAG_REVIEW.value: ("🏷️ Awaiting Tags", "Waiting for tag approval"),
+        PhotoStatus.EXIF_WRITING.value: ("✏️ Writing EXIF", "Writing metadata"),
+        PhotoStatus.EXIF_WRITTEN.value: ("📝 EXIF Written", "Metadata written, pending move"),
+        PhotoStatus.MOVING.value: ("📦 Moving", "Moving to processed folder"),
+        PhotoStatus.PROCESSED.value: ("✅ Processed", "Successfully completed"),
+        PhotoStatus.FAILED.value: ("❌ Failed", "Processing failed"),
+    }
+    
+    total = 0
+    for status_value, (display_name, description) in status_info.items():
+        count = stats.get(status_value, 0)
+        if count > 0:
+            table.add_row(display_name, str(count), description)
+            total += count
+    
+    if total == 0:
+        console.print("💭 No photos in processing database")
+        return
+    
+    console.print(table)
+    console.print(f"\n📁 Total photos tracked: {total}")
+    
+    # Show stuck photos
+    stuck = state_db.get_stuck_photos()
+    if stuck:
+        console.print(f"\n⚠️  {len(stuck)} photos appear to be stuck (locked > 5 min)")
+        console.print("Run 'phototag reset-stuck' to unlock them")
+    
+    # Show failed photos details
+    if failed:
+        failed_photos = state_db.get_failed_photos()
+        if failed_photos:
+            console.print(f"\n❌ Failed Photos ({len(failed_photos)} total):")
+            
+            failed_table = Table(show_header=True)
+            failed_table.add_column("Photo", style="red")
+            failed_table.add_column("Error", style="yellow")
+            failed_table.add_column("Failed At")
+            failed_table.add_column("Retries")
+            
+            for photo in failed_photos[:10]:  # Show max 10
+                failed_table.add_row(
+                    Path(photo['filepath']).name,
+                    photo['error_message'][:50] + "..." if len(photo['error_message']) > 50 else photo['error_message'],
+                    photo['error_at'] if photo['error_at'] else "Unknown",
+                    str(photo['retry_count'])
+                )
+            
+            console.print(failed_table)
+            if len(failed_photos) > 10:
+                console.print(f"... and {len(failed_photos) - 10} more")
+            console.print("\nRun 'phototag process --retry-failed' to retry failed photos")
+    
+    # Show photos awaiting tags
+    if awaiting_tags:
+        awaiting = []
+        result = state_db._get_connection().execute(
+            "SELECT filepath, pending_tags_json FROM photos WHERE status = ?",
+            (PhotoStatus.AWAITING_TAG_REVIEW.value,)
+        )
+        
+        for row in result:
+            if row['pending_tags_json']:
+                import json
+                tags = json.loads(row['pending_tags_json'])
+                awaiting.append((Path(row['filepath']).name, tags))
+        
+        if awaiting:
+            console.print(f"\n🏷️ Photos Awaiting Tag Approval ({len(awaiting)} total):")
+            
+            tag_table = Table(show_header=True)
+            tag_table.add_column("Photo", style="cyan")
+            tag_table.add_column("Pending Tags", style="yellow")
+            
+            for photo_name, tags in awaiting[:10]:
+                tag_table.add_row(photo_name, ", ".join(tags))
+            
+            console.print(tag_table)
+            if len(awaiting) > 10:
+                console.print(f"... and {len(awaiting) - 10} more")
+            console.print("\nRun 'phototag review-tags' to approve/reject pending tags")
+
+
+@app.command()
+def reset_stuck():
+    """Reset photos that have been stuck in processing."""
+    state_db = ProcessingStateDB()
+    
+    stuck = state_db.get_stuck_photos()
+    if not stuck:
+        console.print("✅ No stuck photos found")
+        return
+    
+    console.print(f"🔄 Found {len(stuck)} stuck photos:")
+    for photo_path in stuck[:5]:
+        console.print(f"  • {Path(photo_path).name}")
+    if len(stuck) > 5:
+        console.print(f"  ... and {len(stuck) - 5} more")
+    
+    if Confirm.ask("Reset these photos to pending?"):
+        count = state_db.unlock_stuck_photos()
+        console.print(f"✅ Reset {count} photos to pending status")
+        console.print("Run 'phototag process --continue' to resume processing")
+
+
+@app.command()
+def db_clean(
+    days: int = typer.Option(
+        30, "--days", "-d", help="Remove records older than this many days"
+    ),
+):
+    """Clean up old processing records from database."""
+    state_db = ProcessingStateDB()
+    
+    # Get current statistics before cleanup
+    stats = state_db.get_statistics()
+    processed_count = stats.get(PhotoStatus.PROCESSED.value, 0)
+    
+    if processed_count == 0:
+        console.print("ℹ️  No processed records to clean")
+        return
+    
+    console.print(f"🗑️  Will remove processed records older than {days} days")
+    console.print(f"📁 Currently tracking {processed_count} processed photos")
+    
+    if Confirm.ask("Proceed with cleanup?"):
+        removed = state_db.cleanup_old_records(days)
+        console.print(f"✅ Removed {removed} old records")
+        
+        # Show new statistics
+        new_stats = state_db.get_statistics()
+        new_processed = new_stats.get(PhotoStatus.PROCESSED.value, 0)
+        console.print(f"📁 Now tracking {new_processed} processed photos")
+
+
+@app.command()
+def db_stats():
+    """Show detailed database statistics."""
+    state_db = ProcessingStateDB()
+    
+    # Get statistics
+    stats = state_db.get_statistics()
+    
+    # Get database file size
+    db_path = state_db.db_path
+    db_size = db_path.stat().st_size if db_path.exists() else 0
+    
+    # Format size
+    if db_size < 1024:
+        size_str = f"{db_size} bytes"
+    elif db_size < 1024 * 1024:
+        size_str = f"{db_size / 1024:.1f} KB"
+    else:
+        size_str = f"{db_size / (1024 * 1024):.1f} MB"
+    
+    console.print(f"\n🗜️ Database Statistics")
+    console.print(f"Location: {db_path}")
+    console.print(f"Size: {size_str}")
+    
+    # Get session information
+    conn = state_db._get_connection()
+    result = conn.execute(
+        "SELECT COUNT(*) as count FROM processing_sessions"
+    )
+    session_count = result.fetchone()['count']
+    
+    result = conn.execute(
+        """SELECT 
+            COUNT(*) as total,
+            SUM(photos_processed) as processed,
+            SUM(photos_failed) as failed
+        FROM processing_sessions"""
+    )
+    session_stats = result.fetchone()
+    
+    console.print(f"\n📦 Processing Sessions: {session_count}")
+    if session_stats['processed']:
+        console.print(f"  • Total processed: {session_stats['processed']}")
+    if session_stats['failed']:
+        console.print(f"  • Total failed: {session_stats['failed']}")
+    
+    # Show photo distribution
+    total = sum(stats.values())
+    if total > 0:
+        console.print(f"\n📸 Photos in Database: {total}")
+        
+        # Create a simple bar chart
+        max_count = max(stats.values()) if stats else 1
+        for status in [PhotoStatus.PROCESSED, PhotoStatus.FAILED, PhotoStatus.AWAITING_TAG_REVIEW, PhotoStatus.PENDING]:
+            count = stats.get(status.value, 0)
+            if count > 0:
+                bar_length = int((count / max_count) * 30)
+                bar = '█' * bar_length
+                percentage = (count / total) * 100
+                console.print(f"  {status.value:20} {bar} {count:5} ({percentage:.1f}%)")
 
 
 @app.command()
@@ -451,4 +744,11 @@ def config():
 
 
 if __name__ == "__main__":
-    app()
+    try:
+        app()
+    except KeyboardInterrupt:
+        console.print("\n⚠️  Interrupted by user", style="yellow")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"\n❌ Error: {e}", style="red")
+        sys.exit(1)

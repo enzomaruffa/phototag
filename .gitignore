@@ -191,5 +191,7 @@ inbox/
 processed/
 outbox/
 
+.DS_Store
+
 .claude/
 .phototag/
