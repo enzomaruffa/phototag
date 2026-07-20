@@ -1,316 +1,101 @@
 # PhotoTag
 
-AI-powered photo tagging and upload system for Immich. Automatically analyzes photos using OpenAI's vision models, embeds metadata into EXIF data, and uploads to your Immich server.
+AI-powered photo tagging and upload pipeline for Immich. Analyzes photos with OpenAI vision models, embeds ratings/tags/descriptions into EXIF, and uploads everything to your Immich server. Videos flow through the same pipeline without AI analysis.
 
-## Features
+```
+inbox/ ──▶ [AI analysis + EXIF] ──▶ processed/ ──▶ [Immich upload] ──▶ outbox/
+              (videos skip AI          │
+               and move straight       ▼
+               through)          [state database]
+                                 (resume anywhere)
+```
 
-- **AI-Powered Analysis**: Uses OpenAI GPT-4 Vision to analyze photo content, subjects, and quality
-- **EXIF Metadata Embedding**: Adds descriptions, tags, and ratings directly to photo files
-- **Smart Tag Management**: Learns from your existing tags and suggests new ones for review
-- **Workflow Management**: Organized inbox → processed → outbox workflow
-- **Immich Integration**: Direct upload to Immich via SSH tunnel
-- **RAW Support**: Handles RAW files (ARW, CR2, NEF, DNG) and standard formats
-- **Resumable Processing**: Full state tracking - interrupt anytime and resume exactly where you left off
-- **Parallel Processing**: Process multiple photos simultaneously with configurable worker count
-- **Automatic Recovery**: Detects and recovers from stuck or failed photos
-
-## Installation
-
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd phototag
-   ```
-
-2. **Install with uv** (recommended):
-   ```bash
-   uv sync
-   ```
-
-   Or with pip:
-   ```bash
-   pip install -e .
-   ```
-
-3. **Set up environment variables** in `.env`:
-   ```env
-   OPENAI_API_KEY=your_openai_api_key_here
-   
-   # Directory configuration (optional - will use defaults)
-   INBOX_DIR=./inbox
-   PROCESSED_DIR=./processed
-   OUTBOX_DIR=./outbox
-   
-   # Immich SSH configuration (choose one option)
-   # Option 1: Use SSH config entry
-   IMMICH_SSH_CONFIG_NAME=my-immich-server
-   
-   # Option 2: Direct host/user specification
-   IMMICH_SERVER_HOST=your-immich-server.com
-   IMMICH_SERVER_USER=your-username
-   ```
-
-4. Install exiftool for metadata handling:
-   ```bash
-   sudo apt install exiftool
-   ```
-
-   or on macOS with Homebrew:
-
-   ```bash
-   brew install exiftool
-   ```
-
-## Quick Start
-
-1. **Check configuration**:
-   ```bash
-   phototag config
-   ```
-
-2. **Add photos to inbox**:
-   ```bash
-   mkdir inbox
-   cp /path/to/your/photos/* inbox/
-   ```
-
-3. **Process photos with AI**:
-   ```bash
-   phototag process
-   ```
-
-4. **Review suggested tags**:
-   ```bash
-   phototag review-tags
-   ```
-
-5. **Upload to Immich**:
-   ```bash
-   phototag upload --album "My Photos"
-   ```
-
-## Resumption & Recovery Features
-
-### Interrupt-Safe Processing
-
-PhotoTag saves its state after every processing step:
-1. **AI Analysis** - Saved immediately after completion
-2. **Tag Check** - Tracks which tags need approval
-3. **EXIF Writing** - Confirms metadata was written
-4. **File Move** - Records final location
-
-You can safely interrupt processing at any time with Ctrl+C and resume later:
+## Quick start
 
 ```bash
-# Start processing
-phototag process --workers 4
-# Press Ctrl+C to interrupt safely
+make setup            # install dependencies (uv)
+cp .env.example .env  # then fill in OPENAI_API_KEY + Immich SSH settings
 
-# Resume where you left off
-phototag process --continue
+# Drop photos/videos into inbox/, then:
+make process          # AI-analyze photos, pass videos through
+make review           # approve/reject new AI-suggested tags
+make upload           # upload processed/ to Immich, move to outbox/
 ```
 
-### Processing Status
+`make help` lists everything:
 
-Check the current state of all photos:
+| Target | What it does |
+|---|---|
+| `make process` | Analyze inbox photos with AI (`WORKERS=4` to override) |
+| `make retry` | Re-queue failed photos and process them again |
+| `make review` | Review pending AI-suggested tags |
+| `make upload` | Upload to Immich (`ALBUM="Trip 2026"` optional) |
+| `make status` | Show processing status |
+| `make failed` | Show failed photo details |
+| `make doctor` | Fix database/disk drift (stuck or orphaned records) |
 
-```bash
-# Show overall statistics
-phototag status
+All targets wrap the `phototag` CLI (`uv run phototag --help` for the full option set).
 
-# Show details of failed photos
-phototag status --failed
+## Requirements
 
-# Show photos waiting for tag approval
-phototag status --awaiting-tags
-```
+- [uv](https://docs.astral.sh/uv/)
+- `exiftool` (`brew install exiftool` / `apt install exiftool`)
+- `immich` CLI for uploads
+- An OpenAI API key
 
-### Recovery Commands
+## Configuration
 
-Handle stuck or failed photos:
+Set in `.env` (see `.env.example`):
 
-```bash
-# Reset photos stuck in processing
-phototag reset-stuck
+| Variable | Purpose |
+|---|---|
+| `OPENAI_API_KEY` | Required for photo analysis |
+| `INBOX_DIR` / `PROCESSED_DIR` / `OUTBOX_DIR` | Pipeline directories (default `./inbox`, `./processed`, `./outbox`) |
+| `IMMICH_SSH_CONFIG_NAME` | SSH config entry for the Immich server tunnel |
+| `IMMICH_SERVER_HOST` + `IMMICH_SERVER_USER` | Alternative to the SSH config entry |
 
-# Retry failed photos
-phototag process --retry-failed
+`phototag config` shows what's set and what's missing.
 
-# Show database statistics
-phototag db-stats
+## How processing works
 
-# Clean old processed records (>30 days)
-phototag db-clean --days 30
-```
+Each photo moves through tracked states in a SQLite database (`.phototag/processing_state.db`), so you can interrupt at any point (Ctrl+C) and resume with `phototag process`:
 
-## Commands
+1. **AI analysis** — GPT-4o rates the photo 1–5 stars, writes a description, and picks tags (strongly preferring your existing tag vocabulary). The response is saved immediately, so a photo is never analyzed (or billed) twice.
+2. **Tag review** — brand-new tags are queued for your approval; by default photos continue processing with only approved tags, and `phototag review-tags` backfills approved tags into EXIF afterwards.
+3. **EXIF write** — rating, description, keywords, and notes are embedded with exiftool (existing metadata is preserved, keywords are merged).
+4. **Move** — the file lands in `processed/`, ready for upload.
 
-### `phototag process`
+**Videos** are detected by extension and go straight from step 0 to step 4 — no AI, no EXIF, just tracked and moved so they ride along to Immich with everything else.
 
-Analyzes photos with AI and embeds metadata into EXIF data.
+### Failure handling
 
-```bash
-phototag process [OPTIONS] [INBOX_DIR]
+- AI analysis retries 3× with backoff (2s, 8s) — enough to survive files still being delivered by a sync tool (Syncthing, Dropbox, etc.).
+- Photos that still fail are marked in the database with the error. `make failed` shows them, `make retry` re-queues and reprocesses them.
+- `make doctor` reconciles the database with the filesystem: unsticks records left behind by a killed worker, adopts files that made it to `processed/` without the database hearing about it, and deletes records whose files are gone.
 
-Options:
-  -w, --workers INTEGER    Number of parallel workers (default: 2, max: CPU count)
-  --skip-existing         Skip photos already processed (default: True)
-  -c, --continue          Continue from previous interrupted session
-  --retry-failed          Retry previously failed photos
-```
+## Supported formats
 
-**What it does:**
-- Analyzes each photo for content, subjects, and quality
-- Generates descriptions and suggests tags
-- Embeds approved tags and metadata into EXIF data
-- Saves state after every processing step for perfect resumption
-- Moves processed photos to `processed/` directory atomically
-- Saves new tag suggestions for review
-- Supports graceful interruption with Ctrl+C
+- **Photos**: JPG, JPEG, PNG, TIFF
+- **RAW**: ARW, CR2, NEF, DNG, RAW (decoded via rawpy for analysis; originals untouched)
+- **Videos** (passthrough): MP4, MOV, AVI, M4V, MPG, MPEG, MTS, M2TS, 3GP, WMV, WEBM, MKV
 
-### `phototag review-tags`
+## SSH setup for Immich
 
-Interactive review of AI-suggested tags.
+Recommended — an entry in `~/.ssh/config`:
 
-```bash
-phototag review-tags
-```
-
-**Features:**
-- Shows table of pending tags with confidence scores
-- Interactive approval/rejection
-- Updates EXIF data for approved tags
-- **Auto-completes** photos that were waiting for approved tags
-- Learns from your decisions for future suggestions
-
-### `phototag upload`
-
-Uploads photos to Immich server via SSH tunnel.
-
-```bash
-phototag upload [OPTIONS] [SOURCE_DIR] [DESTINATION_DIR]
-
-Options:
-  -a, --album TEXT    Album name for upload
-  --skip-ai BOOL     Skip AI analysis check (default: False)
-```
-
-**What it does:**
-- Establishes SSH tunnel to Immich server
-- Uploads all photos with embedded metadata
-- Moves uploaded photos to `outbox/` directory
-- Handles connection retries and failures gracefully
-
-### `phototag config`
-
-Shows current configuration and setup status.
-
-```bash
-phototag config
-```
-
-## Workflow
-
-The typical workflow involves three directories:
-
-1. **Inbox** (`./inbox/`): Drop photos here for processing
-2. **Processed** (`./processed/`): AI-analyzed photos ready for upload
-3. **Outbox** (`./outbox/`): Successfully uploaded photos
-
-```
-Photos -> Inbox -> [AI Analysis] -> Processed -> [Upload] -> Outbox
-                         ↓
-                  [State Database]
-                   (Resume from any point)
-```
-
-### Parallel Processing
-
-Process multiple photos simultaneously for faster throughput:
-
-```bash
-# Use 4 workers for faster processing
-phototag process --workers 4
-
-# Monitor progress with status in another terminal
-watch phototag status
-```
-
-## AI Analysis
-
-The AI service analyzes each photo for:
-
-- **Content Description**: Natural language description of the photo
-- **Subject Tags**: What's in the photo (people, objects, scenes)
-- **Quality Rating**: 1-5 star rating based on technical and artistic quality
-- **Technical Notes**: Camera settings, lighting conditions, etc.
-
-### Tag Learning System
-
-PhotoTag builds a knowledge base of your tagging preferences:
-
-- **Approved Tags**: Tags you've approved for automatic use
-- **Pending Tags**: New AI suggestions awaiting your review
-- **Context-Aware**: AI considers your existing tags when making suggestions
-
-## EXIF Metadata
-
-The following metadata is embedded into your photos:
-
-- `Description`: AI-generated photo description
-- `Keywords`: Approved tags as comma-separated keywords
-- `Rating`: 1-5 star quality rating
-- `UserComment`: Technical notes and analysis details
-
-## SSH Configuration
-
-### Option 1: SSH Config Entry (Recommended)
-
-Add to `~/.ssh/config`:
 ```
 Host my-immich-server
     HostName your-server.com
     User your-username
-    Port 22
     IdentityFile ~/.ssh/id_rsa
 ```
 
-Then set:
-```env
-IMMICH_SSH_CONFIG_NAME=my-immich-server
-```
-
-### Option 2: Direct Configuration
-
-```env
-IMMICH_SERVER_HOST=your-server.com
-IMMICH_SERVER_USER=your-username
-```
-
-## Supported Formats
-
-- **Standard**: JPG, JPEG, PNG, TIFF, TIF
-- **RAW**: RAW, DNG, CR2, NEF, ARW
-
-RAW files are automatically processed for AI analysis while preserving the original file.
+with `IMMICH_SSH_CONFIG_NAME=my-immich-server` in `.env`. The uploader opens a tunnel to the server's Immich port (2283), reuses an existing tunnel when one is up, and retries on connection loss.
 
 ## Development
 
-### Setup Development Environment
-
 ```bash
 uv sync --group dev
-```
-
-### Code Quality
-
-```bash
-# Format code
-uv run black .
-
-# Lint code
-uv run ruff check .
-
-# Run tests
-uv run pytest
+make fmt    # black
+make lint   # ruff
 ```
