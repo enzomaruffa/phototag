@@ -105,10 +105,13 @@ def process_single_photo(
         if is_video(photo_path):
             # Videos can't be AI-tagged - move them straight to processed
             state_db.update_photo_status(filepath, PhotoStatus.MOVING)
+            final_hashes = file_hashes(photo_path)
             dest_path = unique_destination(processed_dir, photo_path)
             shutil.move(str(photo_path), str(dest_path))
             state_db.update_photo_status(
-                filepath, PhotoStatus.PROCESSED, {"moved_to": str(dest_path)}
+                filepath,
+                PhotoStatus.PROCESSED,
+                {"moved_to": str(dest_path), "processed_hashes": final_hashes},
             )
             logger.info(
                 f"Moved video {photo_path.name} through pipeline (no AI analysis)"
@@ -211,11 +214,16 @@ def process_single_photo(
             # Move file to processed directory
             state_db.update_photo_status(filepath, PhotoStatus.MOVING)
 
+            # Hash the post-EXIF bytes (what Immich will receive) so a copy of
+            # this file re-entering the inbox later is recognized as a duplicate
+            final_hashes = file_hashes(photo_path)
             dest_path = unique_destination(processed_dir, photo_path)
             shutil.move(str(photo_path), str(dest_path))
 
             state_db.update_photo_status(
-                filepath, PhotoStatus.PROCESSED, {"moved_to": str(dest_path)}
+                filepath,
+                PhotoStatus.PROCESSED,
+                {"moved_to": str(dest_path), "processed_hashes": final_hashes},
             )
 
             logger.info(f"Successfully processed {photo_path.name}")
@@ -306,10 +314,14 @@ class PhotoProcessor:
                 if not skip_existing:
                     continue
                 # A file we already processed is back in the inbox (sync tools
-                # re-deliver). Same bytes -> duplicate, divert it. Different or
+                # re-deliver). Same bytes as either the original OR the
+                # EXIF-written copy -> duplicate, divert it. Different or
                 # unknown bytes -> a new photo wearing an old name: reprocess.
                 hashes = file_hashes(photo_path)
-                if hashes and hashes.sha256 == existing["content_hash"]:
+                if hashes and hashes.sha256 in (
+                    existing["content_hash"],
+                    existing["processed_hash"],
+                ):
                     if self._divert_duplicate(photo_path, state_db):
                         duplicate_count += 1
                     continue
@@ -514,11 +526,14 @@ class PhotoProcessor:
 
                 if success:
                     # Move to processed
+                    final_hashes = file_hashes(photo_path)
                     dest_path = unique_destination(self.processed_dir, photo_path)
                     shutil.move(str(photo_path), str(dest_path))
 
                     state_db.update_photo_status(
-                        filepath, PhotoStatus.PROCESSED, {"moved_to": str(dest_path)}
+                        filepath,
+                        PhotoStatus.PROCESSED,
+                        {"moved_to": str(dest_path), "processed_hashes": final_hashes},
                     )
                     completed += 1
 

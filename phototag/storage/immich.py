@@ -1,12 +1,32 @@
 """SSH tunnel and Immich integration."""
 
 import base64
+import os
 import subprocess
 import time
 import requests
 from pathlib import Path
 from typing import List, Optional, Callable
 import logging
+
+
+def read_cli_api_key() -> Optional[str]:
+    """API key stored by 'immich login', if any.
+
+    The immich CLI saves its key to auth.yml after login; reusing it means
+    no separate IMMICH_API_KEY setup is needed. Handles both the old
+    ('key:') and new ('apiKey:') field names.
+    """
+    config_dir = os.getenv("IMMICH_CONFIG_DIR") or Path.home() / ".config" / "immich"
+    auth_file = Path(config_dir) / "auth.yml"
+    try:
+        for line in auth_file.read_text().splitlines():
+            field, _, value = line.partition(":")
+            if field.strip() in ("key", "apiKey") and value.strip():
+                return value.strip().strip("'\"")
+    except OSError:
+        return None
+    return None
 
 
 class ImmichUploader:

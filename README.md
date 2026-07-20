@@ -57,7 +57,7 @@ Set in `.env` (see `.env.example`):
 | `INBOX_DIR` / `PROCESSED_DIR` / `OUTBOX_DIR` | Pipeline directories (default `./inbox`, `./processed`, `./outbox`) |
 | `IMMICH_SSH_CONFIG_NAME` | SSH config entry for the Immich server tunnel |
 | `IMMICH_SERVER_HOST` + `IMMICH_SERVER_USER` | Alternative to the SSH config entry |
-| `IMMICH_API_KEY` | Only needed for `phototag immich-sync` (create under Immich Account Settings → API Keys) |
+| `IMMICH_API_KEY` | Optional — `immich-sync` reuses the key stored by `immich login`; set this only to override it |
 
 `phototag config` shows what's set and what's missing.
 
@@ -74,17 +74,18 @@ Each photo moves through tracked states in a SQLite database (`.phototag/process
 
 ### Duplicate detection
 
-Every file is hashed (SHA-256) at intake, **before** the EXIF write mutates its bytes — the original content is the only stable identity a photo keeps across re-syncs. An incoming file whose content matches an already-tracked photo skips the whole pipeline and moves straight to `outbox/`: no AI cost, no re-upload, no duplicate in Immich. This catches:
+Every file is hashed **twice** along the pipeline, and incoming inbox files are checked against both:
 
-- **The same photo re-delivered by a sync tool** (Syncthing/Dropbox re-drops), whether under its old name or a new one.
-- **Copies within a batch** — two identical files in the inbox; one is processed, the other diverted.
-- **A different photo re-using an old name** is the opposite case: it's detected by hash mismatch and processed as a new photo instead of being silently skipped.
+- **At intake** (SHA-256 of the original bytes, before the EXIF write mutates them) — catches the same photo re-delivered by a sync tool under its old name or a new one, and identical copies within a batch.
+- **At the move to `processed/`** (the post-EXIF bytes — exactly what gets uploaded) — catches copies of already-processed files re-entering the inbox: dragged back from the outbox, downloaded from Immich, or bounced through a sync loop. Tag backfill (`review-tags`) rewrites EXIF on processed files, so it refreshes these hashes as it goes.
 
-Immich's own server-side checksum dedup can't help here: the EXIF write changes the uploaded bytes, so a re-synced original never matches what the server has. The local hash memory is what makes this work.
+A match means the file skips the whole pipeline and moves straight to `outbox/`: no AI cost, no re-upload, no duplicate in Immich. The opposite case — a *different* photo re-using an already-processed name — is detected by hash mismatch and processed as a new photo instead of being silently skipped.
 
-**`make sync-hashes`** (`phototag immich-sync`) extends dedup to photos that reached Immich through *other* clients (phone app, web upload). It mirrors the server's asset checksums (SHA-1) into the local database; intake then checks incoming files against that set too. Run it from time to time — it needs `IMMICH_API_KEY` set. `phototag status` shows how many checksums are mirrored and when they were last synced.
+Immich's own server-side checksum dedup can't replace the intake check: the EXIF write changes the uploaded bytes, so a re-synced original never matches what the server has. The local hash memory is what makes this work.
 
-Caveats: detection is exact-content only (a re-encoded or resized copy won't match), photos processed before this feature have no stored hash, and `phototag db-clean` forgets the hashes of the records it deletes.
+**`make sync-hashes`** (`phototag immich-sync`) extends dedup to photos that reached Immich through *other* clients (phone app, web upload). It mirrors the server's asset checksums (SHA-1) into the local database; intake then checks incoming files against that set too. Run it from time to time. No extra setup: it reuses the API key `immich login` already stored (the upload flow needs that login anyway); `IMMICH_API_KEY` overrides it if ever needed. `phototag status` shows how many checksums are mirrored and when they were last synced.
+
+Caveats: detection is exact-content only (a re-encoded or resized copy won't match), photos processed before this feature have no stored hashes, and `phototag db-clean` forgets the hashes of the records it deletes.
 
 ### Sync-tool safety
 

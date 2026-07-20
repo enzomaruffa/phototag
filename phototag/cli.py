@@ -22,10 +22,16 @@ from rich.progress import (
 )
 from dotenv import load_dotenv
 
-from phototag.media import find_media_files, is_stable, is_video, unique_destination
+from phototag.media import (
+    file_hashes,
+    find_media_files,
+    is_stable,
+    is_video,
+    unique_destination,
+)
 from phototag.storage.tag_review import TagReviewStorage
 from phototag.storage.exif import EXIFHandler
-from phototag.storage.immich import ImmichUploader
+from phototag.storage.immich import ImmichUploader, read_cli_api_key
 from phototag.storage.state_db import ProcessingStateDB, PhotoStatus
 from phototag.processing.photo_processor import PhotoProcessor
 
@@ -430,10 +436,11 @@ def immich_sync():
     'phototag process' checks incoming files against these checksums and
     diverts matches straight to the outbox instead of re-uploading them.
     """
-    api_key = os.getenv("IMMICH_API_KEY")
+    # Reuse the key 'immich login' already stored; IMMICH_API_KEY only overrides
+    api_key = os.getenv("IMMICH_API_KEY") or read_cli_api_key()
     if not api_key:
         console.print(
-            "❌ IMMICH_API_KEY not found in environment (create one in Immich under Account Settings → API Keys)",
+            "❌ No Immich API key found - run 'immich login' (which the upload flow needs anyway) or set IMMICH_API_KEY",
             style="red",
         )
         raise typer.Exit(1)
@@ -556,6 +563,13 @@ def review_tags(
             if photo_file.exists():
                 if exif_handler.update_exif_tags(photo_file, tags_for_photo):
                     updated += 1
+                    # The EXIF rewrite changed the bytes - keep the stored
+                    # post-EXIF hashes in sync for re-entry dedup
+                    hashes = file_hashes(photo_file)
+                    if hashes:
+                        state_db.update_processed_hashes(
+                            photo_path, hashes.sha256, hashes.sha1
+                        )
             else:
                 gone += 1
 
@@ -973,7 +987,7 @@ def config():
         ("IMMICH_SSH_CONFIG_NAME", "SSH config entry name (alternative to host/user)"),
         (
             "IMMICH_API_KEY",
-            "Immich API key, only needed for 'immich-sync' duplicate detection",
+            "Optional override; 'immich-sync' reuses the key stored by 'immich login'",
         ),
     ]
 

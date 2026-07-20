@@ -122,12 +122,19 @@ class ProcessingStateDB:
                 )
             """)
 
-            # Content-hash columns (added after v1 schemas shipped, so migrate in place)
+            # Content-hash columns (added after v1 schemas shipped, so migrate
+            # in place). content_hash = original inbox bytes; processed_hash /
+            # processed_sha1 = bytes after the EXIF write (what actually gets
+            # uploaded, so processed_sha1 equals Immich's checksum for it).
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(photos)")}
             if "content_hash" not in columns:
                 conn.execute("ALTER TABLE photos ADD COLUMN content_hash TEXT")
             if "duplicate_of" not in columns:
                 conn.execute("ALTER TABLE photos ADD COLUMN duplicate_of TEXT")
+            if "processed_hash" not in columns:
+                conn.execute("ALTER TABLE photos ADD COLUMN processed_hash TEXT")
+            if "processed_sha1" not in columns:
+                conn.execute("ALTER TABLE photos ADD COLUMN processed_sha1 TEXT")
 
             # Indexes for performance
             conn.execute(
@@ -141,6 +148,9 @@ class ProcessingStateDB:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_photos_hash ON photos(content_hash)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_photos_processed_hash ON photos(processed_hash)"
             )
 
     def add_photo(
@@ -167,20 +177,24 @@ class ProcessingStateDB:
     def find_duplicate(
         self, content_hash: str, exclude_filepath: Optional[str] = None
     ) -> Optional[str]:
-        """Filepath of a live photo with the same original content, if any.
+        """Filepath of a live photo with the same content, if any.
 
-        Failed photos don't count (they should be retried, not deduped against)
-        and neither do other duplicates (point at the canonical copy instead).
+        Matches both the original bytes (content_hash) and the post-EXIF bytes
+        (processed_hash), so a copy of an already-processed file wandering
+        back into the inbox is caught too. Failed photos don't count (they
+        should be retried, not deduped against) and neither do other
+        duplicates (point at the canonical copy instead).
         """
         conn = self._get_connection()
         row = conn.execute(
             """
             SELECT filepath FROM photos
-            WHERE content_hash = ? AND filepath != ?
+            WHERE (content_hash = ? OR processed_hash = ?) AND filepath != ?
               AND status NOT IN (?, ?)
             LIMIT 1
         """,
             (
+                content_hash,
                 content_hash,
                 exclude_filepath or "",
                 PhotoStatus.FAILED.value,
@@ -288,6 +302,14 @@ class ProcessingStateDB:
 
                     if "exif_written" in data and data["exif_written"]:
                         updates.append("exif_written_at = CURRENT_TIMESTAMP")
+
+                    # (sha256, sha1) of the file AFTER the EXIF write - the
+                    # bytes that actually get uploaded to Immich
+                    if "processed_hashes" in data and data["processed_hashes"]:
+                        updates.append("processed_hash = ?")
+                        values.append(data["processed_hashes"][0])
+                        updates.append("processed_sha1 = ?")
+                        values.append(data["processed_hashes"][1])
 
                 values.append(filepath)
                 query = f"UPDATE photos SET {', '.join(updates)} WHERE filepath = ?"
@@ -588,6 +610,31 @@ class ProcessingStateDB:
                 photos[row["moved_to_path"] or row["filepath"]] = matching
 
         return photos
+
+    def update_processed_hashes(
+        self, current_path: str, sha256: str, sha1: str
+    ) -> bool:
+        """Refresh the post-EXIF hashes of a photo located by its CURRENT path.
+
+        Tag backfill (review-tags) rewrites EXIF on files that already moved
+        to processed/, changing their bytes - the stored post-EXIF hashes must
+        follow or re-entry detection silently degrades.
+        """
+        try:
+            with self.transaction() as conn:
+                conn.execute(
+                    """
+                    UPDATE photos
+                    SET processed_hash = ?, processed_sha1 = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE moved_to_path = ? OR (moved_to_path IS NULL AND filepath = ?)
+                """,
+                    (sha256, sha1, current_path, current_path),
+                )
+                return conn.total_changes > 0
+        except sqlite3.Error as e:
+            logger.error(f"Failed to update processed hashes for {current_path}: {e}")
+            return False
 
     def replace_immich_checksums(self, checksums: List[str]) -> int:
         """Replace the known-on-Immich checksum set with a fresh server pull."""
