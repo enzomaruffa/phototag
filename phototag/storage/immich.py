@@ -230,7 +230,10 @@ class ImmichUploader:
 
                 # Run upload with monitoring
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=3600  # 1 hour timeout
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=3600,  # 1 hour timeout
                 )
 
                 if result.returncode == 0:

@@ -53,7 +53,7 @@ def is_stable(path: Path, min_age_seconds: float = 30.0) -> bool:
 
 class FileHashes(NamedTuple):
     sha256: str  # local identity across re-syncs
-    sha1: str    # comparable to Immich's asset checksums
+    sha1: str  # comparable to Immich's asset checksums
 
 
 def file_hashes(path: Path) -> Optional[FileHashes]:

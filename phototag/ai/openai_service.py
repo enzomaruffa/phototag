@@ -6,7 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from openai import AsyncOpenAI
 from PIL import Image
@@ -22,7 +22,7 @@ class OpenAIService(AIService):
 
     DEFAULT_MODEL = "gpt-4o-mini"
 
-    def __init__(self, api_key: str, model: str = None):
+    def __init__(self, api_key: str, model: Optional[str] = None):
         self.client = AsyncOpenAI(api_key=api_key)
         # OPENAI_MODEL env var overrides; gpt-4o-mini is ~15x cheaper than gpt-4o
         # and plenty for rating/tagging - set OPENAI_MODEL=gpt-4o for max quality
@@ -59,7 +59,7 @@ class OpenAIService(AIService):
         except Exception as e:
             raise ValueError(f"Failed to process image {image_path}: {e}")
 
-    def _create_prompt(self, existing_tags: List[str] = None) -> str:
+    def _create_prompt(self, existing_tags: Optional[List[str]] = None) -> str:
         """Create contextual prompt with existing tags."""
         base_prompt = """Analyze this photograph and rate it 1-5 stars based on technical quality, composition, and subject interest.
 
@@ -91,11 +91,11 @@ Return JSON only, no other text:
             categories = self._categorize_tags(existing_tags)
             context = f"""
 AVAILABLE TAGS (approved and pending - treat all as usable):
-Subjects: {', '.join(categories.get('subjects', []))}
-Lighting: {', '.join(categories.get('lighting', []))}
-Composition: {', '.join(categories.get('composition', []))}
-Quality: {', '.join(categories.get('quality', []))}
-Other: {', '.join(categories.get('other', []))}
+Subjects: {", ".join(categories.get("subjects", []))}
+Lighting: {", ".join(categories.get("lighting", []))}
+Composition: {", ".join(categories.get("composition", []))}
+Quality: {", ".join(categories.get("quality", []))}
+Other: {", ".join(categories.get("other", []))}
 
 IMPORTANT TAGGING RULES:
 - These tags include both approved and pending tags - use any that apply
@@ -151,7 +151,7 @@ EXAMPLES OF TAG REUSE (prefer existing):
         return categories
 
     async def analyze_photo(
-        self, image_path: Path, existing_tags: List[str] = None
+        self, image_path: Path, existing_tags: Optional[List[str]] = None
     ) -> AIAnalysisResponse:
         """Analyze photo using OpenAI Vision API."""
         max_retries = 3
@@ -189,7 +189,7 @@ EXAMPLES OF TAG REUSE (prefer existing):
                     response_format={"type": "json_object"},
                 )
 
-                result = json.loads(response.choices[0].message.content)
+                result = json.loads(response.choices[0].message.content or "")
                 return AIAnalysisResponse(**result)
 
             except json.JSONDecodeError as e:

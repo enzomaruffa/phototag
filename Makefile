@@ -1,7 +1,7 @@
 WORKERS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help setup process watch retry review upload sync-hashes status failed doctor fmt lint
+.PHONY: help setup process watch retry review upload sync-hashes status failed doctor fmt lint typecheck check
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -38,7 +38,13 @@ doctor: ## Fix database/disk drift (stuck or orphaned records)
 	uv run phototag doctor
 
 fmt: ## Format code
-	uv run black .
+	uv run ruff format phototag/
 
 lint: ## Lint code
 	uv run ruff check .
+
+typecheck: ## Type-check code
+	uv run ty check
+
+check: lint typecheck ## Lint + type-check
+	uv run ruff format --check phototag/
