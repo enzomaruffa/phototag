@@ -97,10 +97,11 @@ def process_single_photo(photo_path: Path,
         return PhotoStatus.FAILED
     
     try:
-        # Determine where to resume from
-        if current['status'] in [PhotoStatus.PENDING.value, 
-                                PhotoStatus.LOCKED.value,
-                                PhotoStatus.AI_ANALYZING.value]:
+        # Determine where to resume from. Branch on whether an analysis is already
+        # saved (not on status): claimed photos are always in 'locked', so a photo
+        # claimed from awaiting_tag_review would otherwise be re-analyzed and
+        # re-billed for no reason.
+        if not current['ai_response_json']:
             # Need to do AI analysis
             state_db.update_photo_status(filepath, PhotoStatus.AI_ANALYZING)
             
@@ -156,8 +157,11 @@ def process_single_photo(photo_path: Path,
             # All tags approved, continue to EXIF
             current['ai_response_json'] = json.dumps(analysis.model_dump())
             current['status'] = PhotoStatus.AI_ANALYZED.value
-        
-        if current['status'] == PhotoStatus.AI_ANALYZED.value or (current['status'] == PhotoStatus.AWAITING_TAG_REVIEW.value and force_process):
+        else:
+            # Analysis already saved from a previous run - resume at the EXIF step
+            current['status'] = PhotoStatus.AI_ANALYZED.value
+
+        if current['status'] == PhotoStatus.AI_ANALYZED.value:
             # Write EXIF metadata
             state_db.update_photo_status(filepath, PhotoStatus.EXIF_WRITING)
             

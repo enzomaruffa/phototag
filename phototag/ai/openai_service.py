@@ -1,6 +1,8 @@
 """OpenAI implementation of AI service."""
 
+import asyncio
 import base64
+import io
 import json
 from pathlib import Path
 from typing import List, Optional
@@ -32,8 +34,9 @@ class OpenAIService(AIService):
                     rgb = raw.postprocess(use_camera_wb=True, half_size=True)
                     img = Image.fromarray(rgb)
             else:
-                # Process regular image file
-                img = Image.open(image_path)
+                # Process regular image file (context manager releases the file handle)
+                with Image.open(image_path) as opened:
+                    img = opened.convert("RGB")
 
             # Convert to RGB if needed and resize for analysis
             if img.mode != "RGB":
@@ -45,8 +48,6 @@ class OpenAIService(AIService):
                 img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
 
             # Save to bytes and encode
-            import io
-
             buffer = io.BytesIO()
             img.save(buffer, format="JPEG", quality=95)
             return base64.b64encode(buffer.getvalue()).decode()
@@ -149,6 +150,10 @@ EXAMPLES OF TAG REUSE (prefer existing):
     ) -> AIAnalysisResponse:
         """Analyze photo using OpenAI Vision API."""
         max_retries = 3
+        # Back off between attempts: transient failures (e.g. a file still being
+        # delivered by a sync tool like Syncthing) need time to resolve, and
+        # re-reading the same partial file milliseconds later is pointless.
+        retry_delays = [2, 8]
         last_error = None
 
         for attempt in range(max_retries):
@@ -190,12 +195,11 @@ EXAMPLES OF TAG REUSE (prefer existing):
                 last_error = (
                     f"Failed to parse AI response as JSON (attempt {attempt + 1}): {e}"
                 )
-                if attempt < max_retries - 1:
-                    continue
             except Exception as e:
-                last_error = f"AI analysis failed (attempt {attempt + 1}): {e}"
-                if attempt < max_retries - 1:
-                    continue
+                last_error = f"AI analysis failed (attempt {attempt + 1}): {type(e).__name__}: {e}"
+
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
 
         raise RuntimeError(f"All retry attempts failed. Last error: {last_error}")
 
