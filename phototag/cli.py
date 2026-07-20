@@ -4,6 +4,7 @@ import os
 import logging
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Optional, List, Dict
 import multiprocessing
@@ -15,7 +16,7 @@ from rich.prompt import Confirm, Prompt
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from dotenv import load_dotenv
 
-from phototag.media import find_media_files, is_video, unique_destination
+from phototag.media import find_media_files, is_stable, is_video, unique_destination
 from phototag.storage.tag_review import TagReviewStorage
 from phototag.storage.exif import EXIFHandler
 from phototag.storage.immich import ImmichUploader
@@ -119,8 +120,12 @@ def process(
             console.print("ℹ️  No incomplete photos found from previous sessions")
             continue_session = False
     
-    # Find photos to process
-    photo_files = find_media_files(inbox_dir)
+    # Find photos to process, skipping files that may still be syncing
+    all_files = find_media_files(inbox_dir)
+    photo_files = [f for f in all_files if is_stable(f)]
+    syncing = len(all_files) - len(photo_files)
+    if syncing:
+        console.print(f"⏳ Skipping {syncing} files modified <30s ago (probably still syncing) - rerun to pick them up", style="yellow")
     video_count = sum(1 for f in photo_files if is_video(f))
     console.print(f"📸 Found {len(photo_files)} media files in inbox ({video_count} videos will pass through without AI analysis)")
     
@@ -215,6 +220,65 @@ def process(
     # Show failed photos if any
     if final_stats.get(PhotoStatus.FAILED.value, 0) > 0:
         console.print(f"\n❌ {final_stats[PhotoStatus.FAILED.value]} photos failed. Run 'phototag status --failed' for details, then 'phototag retry' to re-queue them.", style="red")
+
+
+@app.command()
+def watch(
+    interval: int = typer.Option(
+        30, "--interval", "-i", help="Seconds between inbox scans"
+    ),
+    workers: int = typer.Option(
+        2, "--workers", "-w", help="Number of parallel workers"
+    ),
+):
+    """Watch the inbox and automatically process new files as they arrive (Ctrl+C to stop)."""
+
+    inbox_dir = Path(os.getenv("INBOX_DIR", "./inbox"))
+    processed_dir = Path(os.getenv("PROCESSED_DIR", "./processed"))
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        console.print("❌ OPENAI_API_KEY not found in environment", style="red")
+        raise typer.Exit(1)
+
+    if not inbox_dir.exists():
+        console.print(f"❌ Directory not found: {inbox_dir}", style="red")
+        raise typer.Exit(1)
+
+    console.print(f"👀 Watching {inbox_dir.absolute()} (every {interval}s, Ctrl+C to stop)")
+
+    try:
+        while True:
+            all_files = find_media_files(inbox_dir)
+            stable = [f for f in all_files if is_stable(f)]
+            syncing = len(all_files) - len(stable)
+
+            if stable:
+                video_count = sum(1 for f in stable if is_video(f))
+                console.print(
+                    f"\n📸 Found {len(stable)} new files ({video_count} videos) - processing..."
+                )
+                processor = PhotoProcessor(
+                    api_key=api_key,
+                    inbox_dir=inbox_dir,
+                    processed_dir=processed_dir,
+                    worker_count=workers,
+                )
+                results = processor.process_batch(stable)
+                console.print(
+                    f"✅ Done: {results['processed']} processed, "
+                    f"{results['awaiting_tags']} awaiting tags, {results['failed']} failed"
+                )
+                if results['failed']:
+                    console.print("Run 'phototag retry' to re-queue failures", style="yellow")
+            elif syncing:
+                console.print(f"⏳ {syncing} files still syncing, waiting...")
+
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        console.print("\n👋 Stopped watching")
 
 
 @app.command()
