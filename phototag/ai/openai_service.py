@@ -12,6 +12,7 @@ from PIL import Image
 import rawpy
 
 from .base import AIService
+from ..media import RAW_EXTENSIONS
 from ..models.ai import AIAnalysisResponse
 
 
@@ -26,8 +27,7 @@ class OpenAIService(AIService):
         """Encode image to base64 for OpenAI."""
         try:
             # Check if it's a RAW file
-            raw_extensions = {".arw", ".cr2", ".nef", ".dng", ".raw"}
-            if image_path.suffix.lower() in raw_extensions:
+            if image_path.suffix.lower() in RAW_EXTENSIONS:
                 # Process RAW file - use postprocess for reliable results
                 with rawpy.imread(str(image_path)) as raw:
                     # Process to RGB array (half size for speed)

@@ -13,6 +13,7 @@ import multiprocessing
 import asyncio
 
 from ..ai.openai_service import OpenAIService
+from ..media import is_video, unique_destination
 from ..storage.tag_review import TagReviewStorage
 from ..storage.exif import EXIFHandler
 from ..storage.state_db import ProcessingStateDB, PhotoStatus
@@ -97,6 +98,17 @@ def process_single_photo(photo_path: Path,
         return PhotoStatus.FAILED
     
     try:
+        if is_video(photo_path):
+            # Videos can't be AI-tagged - move them straight to processed
+            state_db.update_photo_status(filepath, PhotoStatus.MOVING)
+            dest_path = unique_destination(processed_dir, photo_path)
+            shutil.move(str(photo_path), str(dest_path))
+            state_db.update_photo_status(
+                filepath, PhotoStatus.PROCESSED, {'moved_to': str(dest_path)}
+            )
+            logger.info(f"Moved video {photo_path.name} through pipeline (no AI analysis)")
+            return PhotoStatus.PROCESSED
+
         # Determine where to resume from. Branch on whether an analysis is already
         # saved (not on status): claimed photos are always in 'locked', so a photo
         # claimed from awaiting_tag_review would otherwise be re-analyzed and
@@ -196,15 +208,8 @@ def process_single_photo(photo_path: Path,
         if current['status'] == PhotoStatus.EXIF_WRITTEN.value:
             # Move file to processed directory
             state_db.update_photo_status(filepath, PhotoStatus.MOVING)
-            
-            dest_path = processed_dir / photo_path.name
-            if dest_path.exists():
-                # Handle naming conflict
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                stem = photo_path.stem
-                suffix = photo_path.suffix
-                dest_path = processed_dir / f"{stem}_{timestamp}{suffix}"
-            
+
+            dest_path = unique_destination(processed_dir, photo_path)
             shutil.move(str(photo_path), str(dest_path))
             
             state_db.update_photo_status(
@@ -415,7 +420,7 @@ class PhotoProcessor:
                 
                 if success:
                     # Move to processed
-                    dest_path = self.processed_dir / photo_path.name
+                    dest_path = unique_destination(self.processed_dir, photo_path)
                     shutil.move(str(photo_path), str(dest_path))
                     
                     state_db.update_photo_status(

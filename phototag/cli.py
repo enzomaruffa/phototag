@@ -22,6 +22,7 @@ from rich.panel import Panel
 from dotenv import load_dotenv
 
 from phototag.ai.openai_service import OpenAIService
+from phototag.media import find_media_files, is_video, unique_destination
 from phototag.storage.tag_review import TagReviewStorage
 from phototag.storage.exif import EXIFHandler
 from phototag.storage.immich import ImmichUploader
@@ -43,38 +44,13 @@ app = typer.Typer(help="AI-powered photo tagging and upload system for Immich")
 console = Console()
 
 
-def get_photo_files(directory: Path) -> List[Path]:
-    """Get list of supported photo files."""
-    extensions = {
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".tiff",
-        ".tif",
-        ".raw",
-        ".dng",
-        ".cr2",
-        ".nef",
-        ".arw",
-    }
-    return [f for f in directory.rglob("*") if f.suffix.lower() in extensions]
-
-
 def move_photos(photo_files: List[Path], destination_dir: Path) -> int:
-    """Move photos to destination directory (EXIF metadata is embedded)."""
+    """Move media files to destination directory (EXIF metadata is embedded)."""
     moved_count = 0
 
     for photo_path in photo_files:
         try:
-            # Move the photo file
-            dest_photo = destination_dir / photo_path.name
-            if dest_photo.exists():
-                # Handle naming conflict by adding timestamp
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                stem = photo_path.stem
-                suffix = photo_path.suffix
-                dest_photo = destination_dir / f"{stem}_{timestamp}{suffix}"
-
+            dest_photo = unique_destination(destination_dir, photo_path)
             shutil.move(str(photo_path), str(dest_photo))
             console.print(f"📦 Moved: {photo_path.name} → {dest_photo.name}")
             moved_count += 1
@@ -152,8 +128,9 @@ def process(
             continue_session = False
     
     # Find photos to process
-    photo_files = get_photo_files(inbox_dir)
-    console.print(f"📸 Found {len(photo_files)} total photos in inbox")
+    photo_files = find_media_files(inbox_dir)
+    video_count = sum(1 for f in photo_files if is_video(f))
+    console.print(f"📸 Found {len(photo_files)} media files in inbox ({video_count} videos will pass through without AI analysis)")
     
     if not photo_files and not continue_session:
         console.print("✅ No photos to process")
@@ -336,12 +313,12 @@ def upload(
 
             if success:
                 console.print(
-                    f"✅ Upload completed. {len(get_photo_files(source_dir))} photos uploaded successfully."
+                    f"✅ Upload completed. {len(find_media_files(source_dir))} files uploaded successfully."
                 )
 
                 # Move photos to destination directory
                 console.print(f"📦 Moving photos to destination directory...")
-                photo_files = get_photo_files(source_dir)
+                photo_files = find_media_files(source_dir)
                 moved_count = move_photos(photo_files, destination_dir)
                 console.print(f"✅ Moved {moved_count} photos to {destination_dir}")
 
