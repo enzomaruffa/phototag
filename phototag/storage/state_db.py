@@ -135,6 +135,12 @@ class ProcessingStateDB:
                 conn.execute("ALTER TABLE photos ADD COLUMN processed_hash TEXT")
             if "processed_sha1" not in columns:
                 conn.execute("ALTER TABLE photos ADD COLUMN processed_sha1 TEXT")
+            # Inferred capture dates for dateless sources (see phototag.dating):
+            # ISO datetime + how it was resolved (exif/stamp/neighbour/mtime)
+            if "capture_date" not in columns:
+                conn.execute("ALTER TABLE photos ADD COLUMN capture_date TEXT")
+            if "capture_date_source" not in columns:
+                conn.execute("ALTER TABLE photos ADD COLUMN capture_date_source TEXT")
 
             # Indexes for performance
             conn.execute(
@@ -310,6 +316,12 @@ class ProcessingStateDB:
                         values.append(data["processed_hashes"][0])
                         updates.append("processed_sha1 = ?")
                         values.append(data["processed_hashes"][1])
+
+                    if "capture_date" in data and data["capture_date"]:
+                        updates.append("capture_date = ?")
+                        values.append(data["capture_date"])
+                        updates.append("capture_date_source = ?")
+                        values.append(data.get("capture_date_source") or "")
 
                 values.append(filepath)
                 query = f"UPDATE photos SET {', '.join(updates)} WHERE filepath = ?"
@@ -610,6 +622,28 @@ class ProcessingStateDB:
                 photos[row["moved_to_path"] or row["filepath"]] = matching
 
         return photos
+
+    def get_dated_siblings(self, dir_prefix: str) -> List[tuple]:
+        """(filepath, capture_date, capture_date_source) for resolved photos
+        whose ORIGINAL inbox path lives directly under dir_prefix.
+
+        Used as neighbour anchors when inferring dates for dateless photos -
+        see phototag.dating.resolve_capture_date.
+        """
+        conn = self._get_connection()
+        prefix = dir_prefix.rstrip("/") + "/"
+        result = conn.execute(
+            """
+            SELECT filepath, capture_date, capture_date_source FROM photos
+            WHERE filepath LIKE ? AND capture_date IS NOT NULL
+        """,
+            (prefix + "%",),
+        )
+        return [
+            (row["filepath"], row["capture_date"], row["capture_date_source"] or "")
+            for row in result
+            if "/" not in row["filepath"][len(prefix) :]
+        ]
 
     def update_processed_hashes(
         self, current_path: str, sha256: str, sha1: str

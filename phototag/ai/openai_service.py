@@ -13,6 +13,7 @@ from PIL import Image
 import rawpy
 
 from .base import AIService
+from ..dating import source_context
 from ..media import RAW_EXTENSIONS
 from ..models.ai import AIAnalysisResponse
 
@@ -28,8 +29,8 @@ class OpenAIService(AIService):
         # and plenty for rating/tagging - set OPENAI_MODEL=gpt-4o for max quality
         self.model = model or os.getenv("OPENAI_MODEL", self.DEFAULT_MODEL)
 
-    def _encode_image(self, image_path: Path) -> str:
-        """Encode image to base64 for OpenAI."""
+    def _encode_image(self, image_path: Path) -> tuple:
+        """Encode image to base64 for OpenAI; returns (b64, orig_width, orig_height)."""
         try:
             # Check if it's a RAW file
             if image_path.suffix.lower() in RAW_EXTENSIONS:
@@ -38,9 +39,12 @@ class OpenAIService(AIService):
                     # Process to RGB array (half size for speed)
                     rgb = raw.postprocess(use_camera_wb=True, half_size=True)
                     img = Image.fromarray(rgb)
+                    # half_size halved both dimensions; report the sensor's real size
+                    orig_size = (img.size[0] * 2, img.size[1] * 2)
             else:
                 # Process regular image file (context manager releases the file handle)
                 with Image.open(image_path) as opened:
+                    orig_size = opened.size
                     img = opened.convert("RGB")
 
             # Convert to RGB if needed and resize for analysis
@@ -55,12 +59,16 @@ class OpenAIService(AIService):
             # Save to bytes and encode
             buffer = io.BytesIO()
             img.save(buffer, format="JPEG", quality=95)
-            return base64.b64encode(buffer.getvalue()).decode()
+            return base64.b64encode(buffer.getvalue()).decode(), *orig_size
         except Exception as e:
             raise ValueError(f"Failed to process image {image_path}: {e}")
 
-    def _create_prompt(self, existing_tags: Optional[List[str]] = None) -> str:
-        """Create contextual prompt with existing tags."""
+    def _create_prompt(
+        self,
+        existing_tags: Optional[List[str]] = None,
+        source_ctx: str = "",
+    ) -> str:
+        """Create contextual prompt with existing tags and source-class context."""
         base_prompt = """Analyze this photograph and rate it 1-5 stars based on technical quality, composition, and subject interest.
 
 Guidelines (be conservative):
@@ -76,6 +84,8 @@ Be AGGRESSIVE with tagging - aim to include at least one tag per major category 
 
 CRITICAL: Maximize use of existing_tags_used and minimize new_tags_needed. Always prefer reusing an existing tag (even if slightly imperfect) over creating a new one. Only create new tags for genuinely unique concepts not covered by any existing tag.
 
+DATE STAMP: If a date is printed/burned into the image itself (corner digits are common on film and toy cameras), return it as visible_date in YYYY-MM-DD form - convert whatever format is shown. Only report a date you can clearly read; otherwise return null. Do NOT infer dates from the scene content.
+
 Return JSON only, no other text:
 {
     "rating": 4,
@@ -83,7 +93,8 @@ Return JSON only, no other text:
     "new_tags_needed": ["graduation"],
     "description": "A young woman in a black graduation cap and gown stands smiling in front of a university building. She holds her diploma proudly while warm afternoon sunlight creates a natural rim light around her silhouette.",
     "notes": "Well-composed graduation portrait with natural lighting",
-    "confidence": 0.85
+    "confidence": 0.85,
+    "visible_date": null
 }"""
 
         if existing_tags:
@@ -113,9 +124,9 @@ EXAMPLES OF TAG REUSE (prefer existing):
 - If 'celebration' exists, don't create 'party' or 'festive'
 - If 'portrait' exists, don't create 'headshot' or 'face'
 """
-            return context + base_prompt
+            return source_ctx + context + base_prompt
 
-        return base_prompt
+        return source_ctx + base_prompt
 
     def _categorize_tags(self, tags: List[str]) -> dict:
         """Simple tag categorization for better prompting."""
@@ -163,8 +174,9 @@ EXAMPLES OF TAG REUSE (prefer existing):
 
         for attempt in range(max_retries):
             try:
-                image_b64 = self._encode_image(image_path)
-                prompt = self._create_prompt(existing_tags)
+                image_b64, orig_w, orig_h = self._encode_image(image_path)
+                source_ctx = source_context(orig_w, orig_h, image_path.stat().st_size)
+                prompt = self._create_prompt(existing_tags, source_ctx)
 
                 response = await self.client.chat.completions.create(
                     model=self.model,

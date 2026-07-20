@@ -21,6 +21,10 @@ class AIAnalysisResponse(BaseModel):
     confidence: Optional[float] = Field(
         None, ge=0.0, le=1.0, description="AI confidence score"
     )
+    visible_date: Optional[str] = Field(
+        None,
+        description="Date stamp printed/burned into the image (YYYY-MM-DD), if clearly legible",
+    )
 
 
 class ProcessedPhoto(BaseModel):

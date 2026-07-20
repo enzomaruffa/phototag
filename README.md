@@ -72,6 +72,15 @@ Each photo moves through tracked states in a SQLite database (`.phototag/process
 
 **Videos** are detected by extension and go straight from step 0 to step 4 — no AI, no EXIF, just tracked and moved so they ride along to Immich with everything else.
 
+### Dateless cameras (toy cams, film scans)
+
+Some sources — keychain cameras like the Kodak Charmera, film-lab scans — write **no EXIF at all**, not even a capture date, so Immich would scatter them across the timeline by upload date. The pipeline compensates in two ways:
+
+- **Source-aware rating.** The AI prompt includes the original resolution and file size; low-res sources (< 2.5 MP) are judged relative to their device class — softness and noise inherent to a toy camera don't tank the rating; they become quality tags instead.
+- **Capture-date inference.** For photos with no EXIF date, a date is resolved in order of trust: the **date stamp printed in the image** (the AI reads corner digits and returns them structured) → the **nearest same-folder neighbour** by filename sequence that already has a trusted date → **file mtime** as a last resort. The filename's trailing number then offsets the result by seconds, so `PICT0043` always sorts right after `PICT0042` even when both share a stamp date. The result is written as `DateTimeOriginal`/`CreateDate` — only ever when the file had none — and recorded in the state DB (`capture_date`, `capture_date_source`).
+
+Photos that already have an EXIF date are never touched; they serve as anchors for their dateless neighbours.
+
 ### Duplicate detection
 
 Every file is hashed **twice** along the pipeline, and incoming inbox files are checked against both:

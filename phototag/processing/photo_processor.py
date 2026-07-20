@@ -13,6 +13,7 @@ import multiprocessing
 import asyncio
 
 from ..ai.openai_service import OpenAIService
+from ..dating import exiftool_to_iso, resolve_capture_date
 from ..media import file_hashes, is_video, unique_destination
 from ..storage.tag_review import TagReviewStorage
 from ..storage.exif import EXIFHandler
@@ -80,6 +81,53 @@ def process_worker_function(
     state_db.close()
 
     return results
+
+
+def resolve_and_write_capture_date(
+    photo_path: Path,
+    analysis: AIAnalysisResponse,
+    exif_handler: EXIFHandler,
+    state_db: ProcessingStateDB,
+) -> Dict[str, str]:
+    """Ensure the photo has a capture date; returns DB fields to persist.
+
+    Dateless sources (toy cameras, film scans) get a date inferred from the
+    printed date stamp the AI read, a dated same-folder neighbour, or file
+    mtime - offset by the filename sequence number so shooting order survives.
+    Photos that already have an EXIF date are recorded as anchors, untouched.
+    """
+    try:
+        existing = exif_handler.get_capture_date(photo_path)
+        if existing:
+            iso = exiftool_to_iso(existing)
+            if iso:
+                return {"capture_date": iso, "capture_date_source": "exif"}
+            return {}
+
+        neighbours = state_db.get_dated_siblings(str(photo_path.parent))
+        resolved = resolve_capture_date(
+            photo_path,
+            has_exif_date=False,
+            visible_date=analysis.visible_date,
+            neighbours=neighbours,
+        )
+        if not resolved:
+            return {}
+        capture_dt, source = resolved
+        if not exif_handler.set_capture_date(photo_path, capture_dt):
+            return {}
+        logger.info(
+            f"Inferred capture date {capture_dt.isoformat()} for "
+            f"{photo_path.name} (source: {source})"
+        )
+        return {
+            "capture_date": capture_dt.isoformat(),
+            "capture_date_source": source,
+        }
+    except Exception as e:
+        # Date inference is best-effort; never fail the pipeline over it
+        logger.warning(f"Capture-date resolution failed for {photo_path.name}: {e}")
+        return {}
 
 
 def process_single_photo(
@@ -205,8 +253,14 @@ def process_single_photo(
             if not success:
                 raise Exception("Failed to write EXIF metadata")
 
+            date_fields = resolve_and_write_capture_date(
+                photo_path, analysis, exif_handler, state_db
+            )
+
             state_db.update_photo_status(
-                filepath, PhotoStatus.EXIF_WRITTEN, {"exif_written": True}
+                filepath,
+                PhotoStatus.EXIF_WRITTEN,
+                {"exif_written": True, **date_fields},
             )
             current["status"] = PhotoStatus.EXIF_WRITTEN.value
 
@@ -525,6 +579,10 @@ class PhotoProcessor:
                 )
 
                 if success:
+                    date_fields = resolve_and_write_capture_date(
+                        photo_path, analysis, exif_handler, state_db
+                    )
+
                     # Move to processed
                     final_hashes = file_hashes(photo_path)
                     dest_path = unique_destination(self.processed_dir, photo_path)
@@ -533,7 +591,11 @@ class PhotoProcessor:
                     state_db.update_photo_status(
                         filepath,
                         PhotoStatus.PROCESSED,
-                        {"moved_to": str(dest_path), "processed_hashes": final_hashes},
+                        {
+                            "moved_to": str(dest_path),
+                            "processed_hashes": final_hashes,
+                            **date_fields,
+                        },
                     )
                     completed += 1
 

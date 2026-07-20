@@ -22,6 +22,7 @@ Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 - `phototag/storage/exif.py` — exiftool wrapper; `phototag/storage/immich.py` — SSH tunnel + Immich API/CLI
 - `phototag/ai/openai_service.py` — vision analysis, JSON-mode responses, retry with backoff
 - `phototag/media.py` — extension sets, `file_hashes()`, `is_stable()`, `unique_destination()`
+- `phototag/dating.py` — capture-date inference for dateless sources (toy cams, film scans): printed-stamp parsing, neighbour anchors, filename-sequence offsets, and the AI source-class prompt hint
 
 ## Invariants — read before touching the pipeline
 
@@ -31,6 +32,7 @@ Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 - **AI responses are saved immediately** after analysis; any resume path must check `ai_response_json` before re-analyzing (re-analysis = re-billing).
 - **Workers are separate processes** (ProcessPoolExecutor); anything passed to them must be picklable, and each creates its own service/DB instances. Dedup runs serially in the parent during enqueue precisely to avoid worker races.
 - **Sync-tool safety**: files with mtime < 30s are skipped (`is_stable`) because Syncthing delivers partial files that look corrupt.
+- **Capture dates are write-once and inferred conservatively.** `resolve_and_write_capture_date` never overwrites an existing EXIF date; inferred dates chain exif → printed stamp → neighbour anchor → mtime, and only `exif`/`stamp` sources may anchor neighbours (guesses don't compound). It runs at the EXIF step, BEFORE the post-EXIF hash, so `processed_hash` stays correct.
 - Schema changes go in `_init_database` as idempotent `PRAGMA table_info` + `ALTER TABLE` migrations — the DB at `.phototag/` is live and never recreated.
 
 ## Conventions

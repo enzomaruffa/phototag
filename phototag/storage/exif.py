@@ -1,5 +1,6 @@
 """EXIF metadata handling for photos using exiftool."""
 
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import logging
@@ -200,6 +201,41 @@ class EXIFHandler:
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse exiftool JSON output: {e}")
             return {}
+
+    def get_capture_date(self, photo_path: Path) -> Optional[str]:
+        """The file's existing capture date (raw exiftool string), if any."""
+        existing = self._read_metadata_raw(photo_path)
+        for key in ("DateTimeOriginal", "CreateDate", "DateCreated"):
+            value = existing.get(key)
+            if value and str(value).strip() and not str(value).startswith("0000"):
+                return str(value)
+        return None
+
+    def set_capture_date(self, photo_path: Path, capture_date: datetime) -> bool:
+        """Write DateTimeOriginal/CreateDate for files that have none.
+
+        Used for dateless sources (toy cameras, film scans) after the capture
+        date has been inferred - see phototag.dating. Callers check
+        get_capture_date() first; this never merges, it just writes.
+        """
+        try:
+            stamp = capture_date.strftime("%Y:%m:%d %H:%M:%S")
+            cmd = [
+                self.exiftool_path,
+                "-overwrite_original",
+                f"-DateTimeOriginal={stamp}",
+                f"-CreateDate={stamp}",
+                str(photo_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                logging.info(f"Set capture date {stamp} on {photo_path.name}")
+                return True
+            logging.error(f"exiftool error setting capture date: {result.stderr}")
+            return False
+        except Exception as e:
+            logging.error(f"Failed to set capture date on {photo_path}: {e}")
+            return False
 
     def remove_zero_rating(self, photo_path: Path) -> bool:
         """Remove rating if it's set to 0."""
