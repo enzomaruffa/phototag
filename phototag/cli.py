@@ -26,7 +26,7 @@ from phototag.storage.tag_review import TagReviewStorage
 from phototag.storage.exif import EXIFHandler
 from phototag.storage.immich import ImmichUploader
 from phototag.storage.state_db import ProcessingStateDB, PhotoStatus
-from phototag.processing.photo_processor_fixed import PhotoProcessor
+from phototag.processing.photo_processor import PhotoProcessor
 from phototag.models.ai import ProcessedPhoto
 
 # Load environment variables
