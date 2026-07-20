@@ -815,6 +815,7 @@ def config():
     ]
 
     directory_vars = [
+        ("OPENAI_MODEL", "Vision model for analysis (default: gpt-4o-mini)"),
         ("INBOX_DIR", "Default directory for photos to process (default: ./inbox)"),
         (
             "PROCESSED_DIR",

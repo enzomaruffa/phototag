@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 from pathlib import Path
 from typing import List
 
@@ -19,9 +20,13 @@ from ..models.ai import AIAnalysisResponse
 class OpenAIService(AIService):
     """OpenAI implementation for photo analysis."""
 
-    def __init__(self, api_key: str, model: str = "gpt-4o"):
+    DEFAULT_MODEL = "gpt-4o-mini"
+
+    def __init__(self, api_key: str, model: str = None):
         self.client = AsyncOpenAI(api_key=api_key)
-        self.model = model
+        # OPENAI_MODEL env var overrides; gpt-4o-mini is ~15x cheaper than gpt-4o
+        # and plenty for rating/tagging - set OPENAI_MODEL=gpt-4o for max quality
+        self.model = model or os.getenv("OPENAI_MODEL", self.DEFAULT_MODEL)
 
     def _encode_image(self, image_path: Path) -> str:
         """Encode image to base64 for OpenAI."""
@@ -179,16 +184,12 @@ EXAMPLES OF TAG REUSE (prefer existing):
                     ],
                     max_tokens=500,
                     temperature=0.1,
+                    # Guarantees syntactically valid JSON - no markdown fences,
+                    # no parse-failure retries
+                    response_format={"type": "json_object"},
                 )
 
-                # Parse JSON response
-                content = response.choices[0].message.content.strip()
-                if content.startswith("```json"):
-                    content = content.split("```json")[1].split("```")[0].strip()
-                elif content.startswith("```"):
-                    content = content.split("```")[1].split("```")[0].strip()
-
-                result = json.loads(content)
+                result = json.loads(response.choices[0].message.content)
                 return AIAnalysisResponse(**result)
 
             except json.JSONDecodeError as e:
