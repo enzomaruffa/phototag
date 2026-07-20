@@ -1,12 +1,11 @@
 """Photo processor with multiprocessing and resumption support."""
 
-import os
 import signal
 import logging
 import shutil
 import json
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Callable
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, wait
 import multiprocessing

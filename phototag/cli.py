@@ -1,14 +1,11 @@
 """CLI interface for phototag."""
 
-import asyncio
 import os
 import logging
 import shutil
-import signal
 import sys
 from pathlib import Path
 from typing import Optional, List, Dict
-from datetime import datetime
 import multiprocessing
 
 import typer
@@ -16,19 +13,14 @@ from rich.console import Console
 from rich.table import Table
 from rich.prompt import Confirm, Prompt
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-from rich.live import Live
-from rich.layout import Layout
-from rich.panel import Panel
 from dotenv import load_dotenv
 
-from phototag.ai.openai_service import OpenAIService
 from phototag.media import find_media_files, is_video, unique_destination
 from phototag.storage.tag_review import TagReviewStorage
 from phototag.storage.exif import EXIFHandler
 from phototag.storage.immich import ImmichUploader
 from phototag.storage.state_db import ProcessingStateDB, PhotoStatus
 from phototag.processing.photo_processor import PhotoProcessor
-from phototag.models.ai import ProcessedPhoto
 
 # Load environment variables
 load_dotenv()
@@ -183,7 +175,6 @@ def process(
         )
         
         def update_progress(stats):
-            total = sum(stats.values())
             processed = stats.get(PhotoStatus.PROCESSED.value, 0)
             failed = stats.get(PhotoStatus.FAILED.value, 0)
             awaiting = stats.get(PhotoStatus.AWAITING_TAG_REVIEW.value, 0)
@@ -210,7 +201,7 @@ def process(
     console.print(create_progress_display(final_stats))
     
     if results['interrupted'] > 0:
-        console.print(f"\n⚠️  Processing was interrupted. Run with --continue to resume.", style="yellow")
+        console.print("\n⚠️  Processing was interrupted. Run with --continue to resume.", style="yellow")
     
     # Check for pending tags
     tag_storage = TagReviewStorage()
@@ -316,7 +307,7 @@ def upload(
                 )
 
                 # Move photos to destination directory
-                console.print(f"📦 Moving photos to destination directory...")
+                console.print("📦 Moving photos to destination directory...")
                 photo_files = find_media_files(source_dir)
                 moved_count = move_photos(photo_files, destination_dir)
                 console.print(f"✅ Moved {moved_count} photos to {destination_dir}")
@@ -679,7 +670,7 @@ def db_stats():
     else:
         size_str = f"{db_size / (1024 * 1024):.1f} MB"
     
-    console.print(f"\n🗜️ Database Statistics")
+    console.print("\n🗜️ Database Statistics")
     console.print(f"Location: {db_path}")
     console.print(f"Size: {size_str}")
     

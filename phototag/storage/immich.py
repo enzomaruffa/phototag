@@ -4,7 +4,7 @@ import subprocess
 import time
 import requests
 from pathlib import Path
-from typing import List, Optional, Dict, Callable
+from typing import List, Optional, Callable
 import logging
 
 
@@ -106,7 +106,7 @@ class ImmichUploader:
             subprocess.run(
                 ["pkill", "-f", f"ssh.*{self.local_port}:localhost:2283"], check=False
             )
-        except:
+        except Exception:
             pass
 
     def test_connection(self) -> bool:
@@ -115,7 +115,7 @@ class ImmichUploader:
             # Just test if we can reach the server (root path should return HTML)
             response = requests.get(f"{self.immich_url}/", timeout=5)
             return response.status_code == 200
-        except:
+        except Exception:
             return False
 
     def ensure_connection(self) -> bool:
@@ -153,7 +153,7 @@ class ImmichUploader:
                                 for tag in tags_data
                             ]
                         return []
-                except:
+                except Exception:
                     continue
 
             logging.warning("Could not fetch tags from Immich")

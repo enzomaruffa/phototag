@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 from contextlib import contextmanager
 
-from ..models.tags import TagReviewSession, PendingTag, TagReview
+from ..models.tags import TagReviewSession, PendingTag
 
 
 class TagReviewStorage:
