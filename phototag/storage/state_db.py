@@ -25,6 +25,7 @@ class PhotoStatus(Enum):
     MOVING = "moving"
     PROCESSED = "processed"
     FAILED = "failed"
+    DUPLICATE = "duplicate"
 
 
 class ProcessingStateDB:
@@ -97,6 +98,16 @@ class ProcessingStateDB:
                 )
             """)
             
+            # SHA-1 checksums of assets already on the Immich server, pulled
+            # by 'phototag immich-sync' so intake can catch duplicates of
+            # photos uploaded by OTHER clients (phone app, web)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS immich_checksums (
+                    checksum TEXT PRIMARY KEY,
+                    synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Processing sessions table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS processing_sessions (
@@ -110,22 +121,66 @@ class ProcessingStateDB:
                 )
             """)
             
+            # Content-hash columns (added after v1 schemas shipped, so migrate in place)
+            columns = {row['name'] for row in conn.execute("PRAGMA table_info(photos)")}
+            if 'content_hash' not in columns:
+                conn.execute("ALTER TABLE photos ADD COLUMN content_hash TEXT")
+            if 'duplicate_of' not in columns:
+                conn.execute("ALTER TABLE photos ADD COLUMN duplicate_of TEXT")
+
             # Indexes for performance
             conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_worker ON photos(worker_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_session ON photos(session_id)")
-    
-    def add_photo(self, filepath: str, session_id: str) -> bool:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_hash ON photos(content_hash)")
+
+    def add_photo(self, filepath: str, session_id: str,
+                  content_hash: Optional[str] = None) -> bool:
         """Add a new photo to processing queue."""
         try:
             with self.transaction() as conn:
                 conn.execute("""
-                    INSERT OR IGNORE INTO photos (filepath, status, session_id)
-                    VALUES (?, ?, ?)
-                """, (filepath, PhotoStatus.PENDING.value, session_id))
+                    INSERT OR IGNORE INTO photos (filepath, status, session_id, content_hash)
+                    VALUES (?, ?, ?, ?)
+                """, (filepath, PhotoStatus.PENDING.value, session_id, content_hash))
                 return conn.total_changes > 0
         except sqlite3.Error as e:
             logger.error(f"Failed to add photo {filepath}: {e}")
+            return False
+
+    def find_duplicate(self, content_hash: str,
+                       exclude_filepath: Optional[str] = None) -> Optional[str]:
+        """Filepath of a live photo with the same original content, if any.
+
+        Failed photos don't count (they should be retried, not deduped against)
+        and neither do other duplicates (point at the canonical copy instead).
+        """
+        conn = self._get_connection()
+        row = conn.execute("""
+            SELECT filepath FROM photos
+            WHERE content_hash = ? AND filepath != ?
+              AND status NOT IN (?, ?)
+            LIMIT 1
+        """, (content_hash, exclude_filepath or '',
+              PhotoStatus.FAILED.value, PhotoStatus.DUPLICATE.value)).fetchone()
+        return row['filepath'] if row else None
+
+    def record_duplicate(self, filepath: str, content_hash: Optional[str],
+                         duplicate_of: str, moved_to: str,
+                         session_id: Optional[str]) -> bool:
+        """Record an inbox file diverted to the outbox as a duplicate."""
+        try:
+            with self.transaction() as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO photos
+                    (filepath, status, content_hash, duplicate_of,
+                     moved_to_path, moved_at, session_id)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                """, (filepath, PhotoStatus.DUPLICATE.value, content_hash,
+                      duplicate_of, moved_to, session_id))
+                return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to record duplicate {filepath}: {e}")
             return False
     
     def claim_next_photo(self, worker_id: str, include_awaiting_tags: bool = True) -> Optional[str]:
@@ -344,10 +399,21 @@ class ProcessingStateDB:
     def create_session(self, resumed_from: Optional[str] = None, 
                       worker_count: int = 1) -> str:
         """Create a new processing session."""
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         with self.transaction() as conn:
+            # Timestamp has second resolution - suffix on collision so two
+            # runs started within the same second both get a session
+            session_id = base_id
+            for attempt in range(1, 100):
+                exists = conn.execute(
+                    "SELECT 1 FROM processing_sessions WHERE session_id = ?",
+                    (session_id,)
+                ).fetchone()
+                if not exists:
+                    break
+                session_id = f"{base_id}_{attempt}"
             conn.execute("""
-                INSERT INTO processing_sessions 
+                INSERT INTO processing_sessions
                 (session_id, resumed_from_session, worker_count)
                 VALUES (?, ?, ?)
             """, (session_id, resumed_from, worker_count))
@@ -374,13 +440,17 @@ class ProcessingStateDB:
                 """, (row['processed'] or 0, row['failed'] or 0, session_id))
     
     def cleanup_old_records(self, days: int = 30) -> int:
-        """Remove old completed records."""
+        """Remove old completed records.
+
+        Note: this also forgets the content hashes of those photos, so a copy
+        re-synced after cleanup will be processed (and uploaded) again.
+        """
         with self.transaction() as conn:
             cutoff = datetime.now() - timedelta(days=days)
             result = conn.execute("""
-                DELETE FROM photos 
-                WHERE status = ? AND moved_at < ?
-            """, (PhotoStatus.PROCESSED.value, cutoff))
+                DELETE FROM photos
+                WHERE status IN (?, ?) AND moved_at < ?
+            """, (PhotoStatus.PROCESSED.value, PhotoStatus.DUPLICATE.value, cutoff))
             return result.rowcount
     
     def reset_photo(self, filepath: str) -> bool:
@@ -423,6 +493,33 @@ class ProcessingStateDB:
                 photos[row['moved_to_path'] or row['filepath']] = matching
 
         return photos
+
+    def replace_immich_checksums(self, checksums: List[str]) -> int:
+        """Replace the known-on-Immich checksum set with a fresh server pull."""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM immich_checksums")
+            conn.executemany(
+                "INSERT OR IGNORE INTO immich_checksums (checksum) VALUES (?)",
+                [(c,) for c in checksums],
+            )
+            row = conn.execute("SELECT COUNT(*) as count FROM immich_checksums").fetchone()
+            return row['count']
+
+    def has_immich_checksum(self, checksum: str) -> bool:
+        """True if an asset with this SHA-1 already exists on the Immich server."""
+        conn = self._get_connection()
+        row = conn.execute(
+            "SELECT 1 FROM immich_checksums WHERE checksum = ?", (checksum,)
+        ).fetchone()
+        return row is not None
+
+    def immich_checksum_info(self) -> Dict[str, Any]:
+        """Count and last sync time of the Immich checksum mirror."""
+        conn = self._get_connection()
+        row = conn.execute(
+            "SELECT COUNT(*) as count, MAX(synced_at) as synced_at FROM immich_checksums"
+        ).fetchone()
+        return {'count': row['count'], 'synced_at': row['synced_at']}
 
     def get_all_photos(self) -> List[Dict]:
         """Get filepath and status for every tracked photo."""

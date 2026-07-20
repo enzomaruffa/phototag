@@ -1,5 +1,6 @@
 """Photo processor with multiprocessing and resumption support."""
 
+import os
 import signal
 import logging
 import shutil
@@ -12,7 +13,7 @@ import multiprocessing
 import asyncio
 
 from ..ai.openai_service import OpenAIService
-from ..media import is_video, unique_destination
+from ..media import file_hashes, is_video, unique_destination
 from ..storage.tag_review import TagReviewStorage
 from ..storage.exif import EXIFHandler
 from ..storage.state_db import ProcessingStateDB, PhotoStatus
@@ -236,15 +237,18 @@ def process_single_photo(photo_path: Path,
 class PhotoProcessor:
     """Handles photo processing with state tracking and multiprocessing."""
     
-    def __init__(self, 
+    def __init__(self,
                  api_key: str,
                  inbox_dir: Path,
                  processed_dir: Path,
                  worker_count: int = 2,
-                 session_id: Optional[str] = None):
+                 session_id: Optional[str] = None,
+                 outbox_dir: Optional[Path] = None):
         self.api_key = api_key
         self.inbox_dir = inbox_dir
         self.processed_dir = processed_dir
+        # Duplicates skip the whole pipeline and land here (already uploaded)
+        self.outbox_dir = outbox_dir or Path(os.getenv("OUTBOX_DIR", "./outbox"))
         self.worker_count = min(worker_count, multiprocessing.cpu_count())
         self.session_id = session_id
         
@@ -285,26 +289,59 @@ class PhotoProcessor:
         if unlocked:
             logger.info(f"Unlocked {unlocked} stuck photos")
         
-        # Add new photos to database
+        # Add new photos to database, diverting content duplicates to the outbox
         added_count = 0
+        duplicate_count = 0
         for photo_path in photo_files:
-            # Check if already in database
-            existing = state_db.get_photo_status(str(photo_path))
-            
+            filepath = str(photo_path)
+            existing = state_db.get_photo_status(filepath)
+
+            if existing and existing['status'] == PhotoStatus.FAILED.value:
+                if retry_failed:
+                    state_db.reset_photo(filepath)
+                continue
+
+            if existing and existing['status'] == PhotoStatus.PROCESSED.value:
+                if not skip_existing:
+                    continue
+                # A file we already processed is back in the inbox (sync tools
+                # re-deliver). Same bytes -> duplicate, divert it. Different or
+                # unknown bytes -> a new photo wearing an old name: reprocess.
+                hashes = file_hashes(photo_path)
+                if hashes and hashes.sha256 == existing['content_hash']:
+                    if self._divert_duplicate(photo_path, state_db):
+                        duplicate_count += 1
+                    continue
+                state_db.delete_photo(filepath)
+                existing = None
+
             if existing:
-                if skip_existing and existing['status'] == PhotoStatus.PROCESSED.value:
+                continue  # already queued mid-pipeline
+
+            hashes = file_hashes(photo_path)
+            if hashes:
+                # Local pipeline history first, then the mirrored Immich
+                # checksum set ('phototag immich-sync') for photos that
+                # reached the server via other clients
+                duplicate_of = state_db.find_duplicate(
+                    hashes.sha256, exclude_filepath=filepath
+                )
+                if not duplicate_of and state_db.has_immich_checksum(hashes.sha1):
+                    duplicate_of = f"immich:{hashes.sha1}"
+                if duplicate_of:
+                    if self._divert_duplicate(photo_path, state_db,
+                                              content_hash=hashes.sha256,
+                                              duplicate_of=duplicate_of):
+                        duplicate_count += 1
                     continue
-                if not retry_failed and existing['status'] == PhotoStatus.FAILED.value:
-                    continue
-                if existing['status'] == PhotoStatus.FAILED.value:
-                    # Reset failed photo for retry
-                    state_db.reset_photo(str(photo_path))
-            else:
-                # Add new photo
-                if state_db.add_photo(str(photo_path), self.session_id):
-                    added_count += 1
-        
+
+            if state_db.add_photo(filepath, self.session_id,
+                                  content_hash=hashes.sha256 if hashes else None):
+                added_count += 1
+
         logger.info(f"Added {added_count} new photos to processing queue")
+        if duplicate_count:
+            logger.info(f"Diverted {duplicate_count} duplicates straight to {self.outbox_dir}")
         
         # Setup signal handling for graceful shutdown
         self._setup_signal_handlers()
@@ -314,7 +351,8 @@ class PhotoProcessor:
             'processed': 0,
             'awaiting_tags': 0,
             'failed': 0,
-            'interrupted': 0
+            'interrupted': 0,
+            'duplicates': duplicate_count
         }
         # UTC to match sqlite's CURRENT_TIMESTAMP; used to scope stats to this run
         run_started_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -368,6 +406,39 @@ class PhotoProcessor:
         
         return results
     
+    def _divert_duplicate(self, photo_path: Path, state_db: ProcessingStateDB,
+                          content_hash: Optional[str] = None,
+                          duplicate_of: Optional[str] = None) -> bool:
+        """Move a duplicate inbox file straight to the outbox.
+
+        Its content already went (or is going) through the pipeline under
+        another record, so analyzing and uploading it again would only cost
+        money and clutter Immich. With duplicate_of set, a 'duplicate' record
+        is written; without it (same-path re-sync) the original record already
+        tells the story.
+        """
+        try:
+            self.outbox_dir.mkdir(parents=True, exist_ok=True)
+            dest_path = unique_destination(self.outbox_dir, photo_path)
+            shutil.move(str(photo_path), str(dest_path))
+        except OSError as e:
+            logger.error(f"Failed to divert duplicate {photo_path.name}: {e}")
+            return False
+
+        if duplicate_of:
+            state_db.record_duplicate(
+                str(photo_path), content_hash, duplicate_of,
+                str(dest_path), self.session_id
+            )
+        if duplicate_of and duplicate_of.startswith("immich:"):
+            known_as = "an asset already on the Immich server"
+        elif duplicate_of:
+            known_as = Path(duplicate_of).name
+        else:
+            known_as = "its earlier self"
+        logger.info(f"Duplicate {photo_path.name} (same content as {known_as}) diverted to outbox")
+        return True
+
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
         def signal_handler(signum, frame):

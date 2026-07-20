@@ -1,5 +1,6 @@
 """SSH tunnel and Immich integration."""
 
+import base64
 import subprocess
 import time
 import requests
@@ -147,6 +148,53 @@ class ImmichUploader:
         except Exception as e:
             logging.error(f"Failed to fetch tags: {e}")
             return []
+
+    def get_asset_checksums(self, api_key: str) -> Optional[List[str]]:
+        """SHA-1 checksums (hex) of every asset on the server, or None on failure.
+
+        Immich stores each asset's SHA-1 as base64; we convert to hex so the
+        values compare directly against local file hashes. Pages through
+        /api/search/metadata, which is the supported bulk-listing endpoint.
+        """
+        if not self.ensure_connection():
+            return None
+
+        headers = {"x-api-key": api_key}
+        checksums: List[str] = []
+        page: Optional[int] = 1
+
+        try:
+            while page is not None:
+                response = requests.post(
+                    f"{self.immich_url}/api/search/metadata",
+                    headers=headers,
+                    json={"page": page, "size": 1000, "withExif": False},
+                    timeout=30,
+                )
+                if response.status_code != 200:
+                    logging.error(
+                        f"Immich metadata search failed ({response.status_code}): "
+                        f"{response.text[:200]}"
+                    )
+                    return None
+
+                assets = response.json().get("assets", {})
+                for asset in assets.get("items", []):
+                    checksum_b64 = asset.get("checksum")
+                    if checksum_b64:
+                        try:
+                            checksums.append(base64.b64decode(checksum_b64).hex())
+                        except (ValueError, TypeError):
+                            continue
+
+                next_page = assets.get("nextPage")
+                page = int(next_page) if next_page else None
+
+            return checksums
+
+        except Exception as e:
+            logging.error(f"Failed to fetch asset checksums: {e}")
+            return None
 
     def upload_photos(
         self,

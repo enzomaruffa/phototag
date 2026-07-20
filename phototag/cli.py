@@ -77,11 +77,12 @@ def process(
     # Get directory environment variables
     default_inbox = os.getenv("INBOX_DIR", "./inbox")
     default_processed = os.getenv("PROCESSED_DIR", "./processed")
+    outbox_dir = Path(os.getenv("OUTBOX_DIR", "./outbox"))
 
     # Use provided directory or default
     if inbox_dir is None:
         inbox_dir = Path(default_inbox)
-    
+
     processed_dir = Path(default_processed)
     processed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -138,7 +139,8 @@ def process(
         api_key=api_key,
         inbox_dir=inbox_dir,
         processed_dir=processed_dir,
-        worker_count=workers
+        worker_count=workers,
+        outbox_dir=outbox_dir
     )
     
     # Setup progress display
@@ -153,7 +155,8 @@ def process(
             PhotoStatus.AI_ANALYZING.value: "🤖",
             PhotoStatus.AWAITING_TAG_REVIEW.value: "🏷️",
             PhotoStatus.PROCESSED.value: "✅",
-            PhotoStatus.FAILED.value: "❌"
+            PhotoStatus.FAILED.value: "❌",
+            PhotoStatus.DUPLICATE.value: "👯"
         }
         
         for status, count in stats.items():
@@ -201,6 +204,9 @@ def process(
     # Show final results (scoped to this run - not all-time database totals)
     console.print("\n🎯 Processing Complete!")
 
+    if results.get('duplicates'):
+        console.print(f"👯 {results['duplicates']} duplicates diverted straight to the outbox (already uploaded)")
+
     final_state_db = ProcessingStateDB()
     final_stats = final_state_db.get_statistics(since=results.get('started_at'))
     console.print(create_progress_display(final_stats))
@@ -235,6 +241,7 @@ def watch(
 
     inbox_dir = Path(os.getenv("INBOX_DIR", "./inbox"))
     processed_dir = Path(os.getenv("PROCESSED_DIR", "./processed"))
+    outbox_dir = Path(os.getenv("OUTBOX_DIR", "./outbox"))
     processed_dir.mkdir(parents=True, exist_ok=True)
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -264,11 +271,13 @@ def watch(
                     inbox_dir=inbox_dir,
                     processed_dir=processed_dir,
                     worker_count=workers,
+                    outbox_dir=outbox_dir,
                 )
                 results = processor.process_batch(stable)
                 console.print(
                     f"✅ Done: {results['processed']} processed, "
-                    f"{results['awaiting_tags']} awaiting tags, {results['failed']} failed"
+                    f"{results['awaiting_tags']} awaiting tags, "
+                    f"{results['duplicates']} duplicates diverted, {results['failed']} failed"
                 )
                 if results['failed']:
                     console.print("Run 'phototag retry' to re-queue failures", style="yellow")
@@ -382,6 +391,57 @@ def upload(
 
     except Exception as e:
         console.print(f"❌ Upload failed: {e}", style="red")
+        raise typer.Exit(1)
+
+
+@app.command()
+def immich_sync():
+    """Pull asset checksums from Immich so duplicates of photos uploaded by ANY client are caught.
+
+    Run this from time to time (especially if other devices upload to Immich):
+    'phototag process' checks incoming files against these checksums and
+    diverts matches straight to the outbox instead of re-uploading them.
+    """
+    api_key = os.getenv("IMMICH_API_KEY")
+    if not api_key:
+        console.print("❌ IMMICH_API_KEY not found in environment (create one in Immich under Account Settings → API Keys)", style="red")
+        raise typer.Exit(1)
+
+    server_host = os.getenv("IMMICH_SERVER_HOST")
+    server_user = os.getenv("IMMICH_SERVER_USER")
+    ssh_config_name = os.getenv("IMMICH_SSH_CONFIG_NAME")
+
+    if not ssh_config_name and not all([server_host, server_user]):
+        console.print(
+            "❌ Either IMMICH_SSH_CONFIG_NAME or both IMMICH_SERVER_HOST and IMMICH_SERVER_USER must be set",
+            style="red",
+        )
+        raise typer.Exit(1)
+
+    try:
+        if ssh_config_name:
+            uploader_context = ImmichUploader(ssh_config_name=ssh_config_name)
+        else:
+            uploader_context = ImmichUploader(server_host, server_user)
+
+        with uploader_context as uploader:
+            console.print("🔗 SSH tunnel established")
+            console.print("🔍 Fetching asset checksums from Immich...")
+            checksums = uploader.get_asset_checksums(api_key)
+
+        if checksums is None:
+            console.print("❌ Could not fetch checksums from Immich", style="red")
+            raise typer.Exit(1)
+
+        state_db = ProcessingStateDB()
+        count = state_db.replace_immich_checksums(checksums)
+        console.print(f"✅ Synced {count} asset checksums from Immich")
+        console.print("New inbox files matching any of them will be diverted straight to the outbox")
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"❌ Sync failed: {e}", style="red")
         raise typer.Exit(1)
 
 
@@ -538,6 +598,7 @@ def status(
         PhotoStatus.MOVING.value: ("📦 Moving", "Moving to processed folder"),
         PhotoStatus.PROCESSED.value: ("✅ Processed", "Successfully completed"),
         PhotoStatus.FAILED.value: ("❌ Failed", "Processing failed"),
+        PhotoStatus.DUPLICATE.value: ("👯 Duplicate", "Same content as an earlier photo; diverted to outbox"),
     }
     
     total = 0
@@ -553,7 +614,17 @@ def status(
     
     console.print(table)
     console.print(f"\n📁 Total photos tracked: {total}")
-    
+
+    # Show Immich checksum mirror freshness
+    immich_info = state_db.immich_checksum_info()
+    if immich_info['count']:
+        console.print(
+            f"🌐 Immich checksums mirrored: {immich_info['count']} "
+            f"(last synced {immich_info['synced_at']} UTC - run 'phototag immich-sync' to refresh)"
+        )
+    else:
+        console.print("🌐 No Immich checksums mirrored - run 'phototag immich-sync' to catch duplicates of photos uploaded by other clients")
+
     # Show stuck photos
     stuck = state_db.get_stuck_photos()
     if stuck:
@@ -677,7 +748,9 @@ def doctor():
         filepath = photo['filepath']
         status = photo['status']
 
-        if status == PhotoStatus.PROCESSED.value:
+        # Duplicates live in the outbox by design - their records are history,
+        # not drift, so don't garbage-collect them
+        if status in (PhotoStatus.PROCESSED.value, PhotoStatus.DUPLICATE.value):
             continue
 
         if Path(filepath).exists():
@@ -828,6 +901,7 @@ def config():
         ("IMMICH_SERVER_HOST", "Immich server hostname (or use SSH config)"),
         ("IMMICH_SERVER_USER", "SSH username for server (or use SSH config)"),
         ("IMMICH_SSH_CONFIG_NAME", "SSH config entry name (alternative to host/user)"),
+        ("IMMICH_API_KEY", "Immich API key, only needed for 'immich-sync' duplicate detection"),
     ]
 
     # Required variables table

@@ -1,7 +1,7 @@
 WORKERS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help setup process watch retry review upload status failed doctor fmt lint
+.PHONY: help setup process watch retry review upload sync-hashes status failed doctor fmt lint
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -24,6 +24,9 @@ review: ## Review pending AI-suggested tags
 
 upload: ## Upload processed photos to Immich. ALBUM="name" optional
 	uv run phototag upload $(if $(ALBUM),--album "$(ALBUM)")
+
+sync-hashes: ## Pull Immich asset checksums so duplicates from any client are caught
+	uv run phototag immich-sync
 
 status: ## Show processing status
 	uv run phototag status
