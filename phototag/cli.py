@@ -570,6 +570,9 @@ def review_tags(
                         state_db.update_processed_hashes(
                             photo_path, hashes.sha256, hashes.sha1
                         )
+                        state_db.remember_hashes(
+                            photo_path, processed_hash=hashes.sha256
+                        )
             else:
                 gone += 1
 

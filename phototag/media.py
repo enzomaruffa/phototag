@@ -79,6 +79,80 @@ def file_hashes(path: Path) -> Optional[FileHashes]:
         return None
 
 
+def pixel_hash(path: Path) -> Optional[str]:
+    """SHA-256 of the image's encoded pixel data, ignoring all metadata.
+
+    The EXIF write mutates a file's bytes but never its pixels, so this is the
+    one identity that survives the pipeline: an inbox original and the copy
+    uploaded to Immich hash the same. `file_hashes()` can't see that - it's
+    why a re-synced original whose DB record was garbage-collected used to
+    sail past dedup and upload a second time.
+
+    JPEG: everything from the SOS marker on (the entropy-coded scan).
+    PNG:  the concatenated IDAT chunks.
+    Other formats (RAW, TIFF, video) have no cheap metadata-free view of their
+    pixels, so they return None and fall back to whole-file hashing.
+    """
+    suffix = path.suffix.lower()
+    try:
+        if suffix in {".jpg", ".jpeg"}:
+            return _jpeg_scan_hash(path)
+        if suffix == ".png":
+            return _png_idat_hash(path)
+    except OSError:
+        return None
+    return None
+
+
+def _jpeg_scan_hash(path: Path) -> Optional[str]:
+    """Hash the entropy-coded scan data, skipping every metadata segment."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:2] != b"\xff\xd8":
+        return None
+    i, n = 2, len(data)
+    while i < n - 1:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        if marker == 0xDA:  # Start of Scan - pixels run from here to EOF
+            length = int.from_bytes(data[i + 2 : i + 4], "big")
+            return hashlib.sha256(data[i + 2 + length :]).hexdigest()
+        # Standalone markers carry no length field
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        if i + 4 > n:
+            break
+        i += 2 + int.from_bytes(data[i + 2 : i + 4], "big")
+    return None
+
+
+def _png_idat_hash(path: Path) -> Optional[str]:
+    """Hash the IDAT chunks, skipping tEXt/eXIf/time metadata chunks."""
+    with open(path, "rb") as f:
+        if f.read(8) != b"\x89PNG\r\n\x1a\n":
+            return None
+        digest = hashlib.sha256()
+        found = False
+        while True:
+            header = f.read(8)
+            if len(header) < 8:
+                break
+            length = int.from_bytes(header[:4], "big")
+            kind = header[4:8]
+            if kind == b"IDAT":
+                digest.update(f.read(length))
+                found = True
+            else:
+                f.seek(length, 1)
+            f.seek(4, 1)  # CRC
+            if kind == b"IEND":
+                break
+        return digest.hexdigest() if found else None
+
+
 def unique_destination(directory: Path, source: Path) -> Path:
     """Destination path inside directory, timestamped on name conflict."""
     dest = directory / source.name

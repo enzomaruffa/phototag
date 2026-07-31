@@ -83,18 +83,21 @@ Photos that already have an EXIF date are never touched; they serve as anchors f
 
 ### Duplicate detection
 
-Every file is hashed **twice** along the pipeline, and incoming inbox files are checked against both:
+Incoming files are checked three ways, in order of trust:
 
-- **At intake** (SHA-256 of the original bytes, before the EXIF write mutates them) — catches the same photo re-delivered by a sync tool under its old name or a new one, and identical copies within a batch.
-- **At the move to `processed/`** (the post-EXIF bytes — exactly what gets uploaded) — catches copies of already-processed files re-entering the inbox: dragged back from the outbox, downloaded from Immich, or bounced through a sync loop. Tag backfill (`review-tags`) rewrites EXIF on processed files, so it refreshes these hashes as it goes.
+- **Original bytes** (SHA-256 at intake, before the EXIF write mutates them) — catches the same photo re-delivered by a sync tool under its old name or a new one, and identical copies within a batch.
+- **Post-EXIF bytes** (hashed at the move to `processed/` — exactly what gets uploaded) — catches copies of already-processed files re-entering the inbox: dragged back from the outbox, downloaded from Immich, or bounced through a sync loop. Tag backfill (`review-tags`) rewrites EXIF on processed files, so it refreshes these hashes as it goes.
+- **Pixels** (SHA-256 of the JPEG scan data / PNG IDAT chunks, ignoring all metadata) — the same photo hashes identically before and after the EXIF write, so an inbox original still matches the copy already uploaded. This is the check that catches a re-synced original whose byte-level record is long gone.
 
 A match means the file skips the whole pipeline and moves straight to `outbox/`: no AI cost, no re-upload, no duplicate in Immich. The opposite case — a *different* photo re-using an already-processed name — is detected by hash mismatch and processed as a new photo instead of being silently skipped.
 
-Immich's own server-side checksum dedup can't replace the intake check: the EXIF write changes the uploaded bytes, so a re-synced original never matches what the server has. The local hash memory is what makes this work.
+All three hashes are also written to a **permanent ledger** (`known_content`) that `db-clean` never touches. A forgotten hash means a re-upload, and Immich can't catch that for us — its copy has the post-EXIF bytes.
 
-**`make sync-hashes`** (`phototag immich-sync`) extends dedup to photos that reached Immich through *other* clients (phone app, web upload). It mirrors the server's asset checksums (SHA-1) into the local database; intake then checks incoming files against that set too. Run it from time to time. No extra setup: it reuses the API key `immich login` already stored (the upload flow needs that login anyway); `IMMICH_API_KEY` overrides it if ever needed. `phototag status` shows how many checksums are mirrored and when they were last synced.
+Immich's own server-side dedup hashes the **whole file**, not the image, so any EXIF we write produces a new checksum and a new asset. That's precisely why the pixel hash exists.
 
-Caveats: detection is exact-content only (a re-encoded or resized copy won't match), photos processed before this feature have no stored hashes, and `phototag db-clean` forgets the hashes of the records it deletes.
+**`make sync-hashes`** (`phototag immich-sync`) extends dedup to photos that reached Immich through *other* clients (phone app, web upload). It mirrors the server's asset checksums (SHA-1) into the local database; intake then checks incoming files against that set too. Run it from time to time. No extra setup: it reuses the API key `immich login` already stored (the upload flow needs that login anyway); `IMMICH_API_KEY` overrides it if ever needed. `phototag status` shows how many checksums are mirrored and when they were last synced. Note this mirror only ever matches files Immich holds byte-identically — it cannot see our own uploads, which is the pixel hash's job.
+
+Caveats: a **re-encoded or resized** copy won't match any of the three (different pixels on the wire), RAW and video have no cheap metadata-free pixel view so they fall back to byte hashing, and photos processed before this feature have no stored pixel hash.
 
 ### Sync-tool safety
 

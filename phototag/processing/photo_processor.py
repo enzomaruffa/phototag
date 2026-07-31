@@ -14,7 +14,7 @@ import asyncio
 
 from ..ai.openai_service import OpenAIService
 from ..dating import exiftool_to_iso, resolve_capture_date
-from ..media import file_hashes, is_video, unique_destination
+from ..media import file_hashes, is_video, pixel_hash, unique_destination
 from ..storage.tag_review import TagReviewStorage
 from ..storage.exif import EXIFHandler
 from ..storage.state_db import ProcessingStateDB, PhotoStatus
@@ -161,6 +161,10 @@ def process_single_photo(
                 PhotoStatus.PROCESSED,
                 {"moved_to": str(dest_path), "processed_hashes": final_hashes},
             )
+            state_db.remember_hashes(
+                filepath,
+                processed_hash=final_hashes.sha256 if final_hashes else None,
+            )
             logger.info(
                 f"Moved video {photo_path.name} through pipeline (no AI analysis)"
             )
@@ -279,6 +283,10 @@ def process_single_photo(
                 PhotoStatus.PROCESSED,
                 {"moved_to": str(dest_path), "processed_hashes": final_hashes},
             )
+            state_db.remember_hashes(
+                filepath,
+                processed_hash=final_hashes.sha256 if final_hashes else None,
+            )
 
             logger.info(f"Successfully processed {photo_path.name}")
             return PhotoStatus.PROCESSED
@@ -372,9 +380,11 @@ class PhotoProcessor:
                 # EXIF-written copy -> duplicate, divert it. Different or
                 # unknown bytes -> a new photo wearing an old name: reprocess.
                 hashes = file_hashes(photo_path)
-                if hashes and hashes.sha256 in (
-                    existing["content_hash"],
-                    existing["processed_hash"],
+                pixels = pixel_hash(photo_path)
+                if hashes and (
+                    hashes.sha256
+                    in (existing["content_hash"], existing["processed_hash"])
+                    or (pixels and pixels == existing["pixel_hash"])
                 ):
                     if self._divert_duplicate(photo_path, state_db):
                         duplicate_count += 1
@@ -386,12 +396,16 @@ class PhotoProcessor:
                 continue  # already queued mid-pipeline
 
             hashes = file_hashes(photo_path)
+            pixels = pixel_hash(photo_path)
             if hashes:
-                # Local pipeline history first, then the mirrored Immich
-                # checksum set ('phototag immich-sync') for photos that
-                # reached the server via other clients
+                # Local pipeline history and the permanent hash ledger first,
+                # then the mirrored Immich checksum set ('phototag
+                # immich-sync') for photos that reached the server via other
+                # clients. The Immich mirror only ever matches files it holds
+                # byte-identically, so it can't see our own uploads - the
+                # pixel hash is what covers those.
                 duplicate_of = state_db.find_duplicate(
-                    hashes.sha256, exclude_filepath=filepath
+                    hashes.sha256, exclude_filepath=filepath, pixel_hash=pixels
                 )
                 if not duplicate_of and state_db.has_immich_checksum(hashes.sha1):
                     duplicate_of = f"immich:{hashes.sha1}"
@@ -409,8 +423,14 @@ class PhotoProcessor:
                 filepath,
                 self.session_id,
                 content_hash=hashes.sha256 if hashes else None,
+                pixel_hash=pixels,
             ):
                 added_count += 1
+                state_db.remember_hashes(
+                    filepath,
+                    content_hash=hashes.sha256 if hashes else None,
+                    pixel_hash=pixels,
+                )
 
         logger.info(f"Added {added_count} new photos to processing queue")
         if duplicate_count:
@@ -596,6 +616,10 @@ class PhotoProcessor:
                             "processed_hashes": final_hashes,
                             **date_fields,
                         },
+                    )
+                    state_db.remember_hashes(
+                        filepath,
+                        processed_hash=final_hashes.sha256 if final_hashes else None,
                     )
                     completed += 1
 

@@ -5,7 +5,7 @@ import json
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from enum import Enum
 import logging
@@ -109,6 +109,19 @@ class ProcessingStateDB:
                 )
             """)
 
+            # Permanent hash ledger. Deliberately NOT garbage-collected by
+            # cleanup_old_records: a forgotten hash means a re-synced original
+            # gets uploaded a second time, and Immich can't catch it because
+            # its copy has post-EXIF bytes. One row per known hash of any kind.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS known_content (
+                    hash TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    filepath TEXT,
+                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Processing sessions table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS processing_sessions (
@@ -141,6 +154,11 @@ class ProcessingStateDB:
                 conn.execute("ALTER TABLE photos ADD COLUMN capture_date TEXT")
             if "capture_date_source" not in columns:
                 conn.execute("ALTER TABLE photos ADD COLUMN capture_date_source TEXT")
+            # Metadata-independent hash of the encoded pixels (see media.pixel_hash):
+            # survives the EXIF write, so an inbox original and its uploaded
+            # copy match. Null for formats without a cheap pixel view (RAW).
+            if "pixel_hash" not in columns:
+                conn.execute("ALTER TABLE photos ADD COLUMN pixel_hash TEXT")
 
             # Indexes for performance
             conn.execute(
@@ -164,16 +182,24 @@ class ProcessingStateDB:
         filepath: str,
         session_id: Optional[str],
         content_hash: Optional[str] = None,
+        pixel_hash: Optional[str] = None,
     ) -> bool:
         """Add a new photo to processing queue."""
         try:
             with self.transaction() as conn:
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO photos (filepath, status, session_id, content_hash)
-                    VALUES (?, ?, ?, ?)
+                    INSERT OR IGNORE INTO photos
+                    (filepath, status, session_id, content_hash, pixel_hash)
+                    VALUES (?, ?, ?, ?, ?)
                 """,
-                    (filepath, PhotoStatus.PENDING.value, session_id, content_hash),
+                    (
+                        filepath,
+                        PhotoStatus.PENDING.value,
+                        session_id,
+                        content_hash,
+                        pixel_hash,
+                    ),
                 )
                 return conn.total_changes > 0
         except sqlite3.Error as e:
@@ -181,33 +207,87 @@ class ProcessingStateDB:
             return False
 
     def find_duplicate(
-        self, content_hash: str, exclude_filepath: Optional[str] = None
+        self,
+        content_hash: str,
+        exclude_filepath: Optional[str] = None,
+        pixel_hash: Optional[str] = None,
     ) -> Optional[str]:
-        """Filepath of a live photo with the same content, if any.
+        """Filepath of a known photo with the same content, if any.
 
-        Matches both the original bytes (content_hash) and the post-EXIF bytes
-        (processed_hash), so a copy of an already-processed file wandering
-        back into the inbox is caught too. Failed photos don't count (they
-        should be retried, not deduped against) and neither do other
-        duplicates (point at the canonical copy instead).
+        Three ways a match can happen, in order of trust:
+          1. same original bytes (content_hash) - a re-synced original
+          2. same post-EXIF bytes (processed_hash) - a processed copy that
+             wandered back into the inbox
+          3. same pixels (pixel_hash) - the same photo regardless of metadata,
+             which is what catches an original whose uploaded copy differs
+             only by the EXIF we wrote
+
+        Live rows are checked first, then the permanent ledger, which still
+        remembers photos whose processing records were cleaned up. Failed rows
+        don't count (retry them, don't dedup against them) and neither do
+        other duplicates (point at the canonical copy instead).
         """
         conn = self._get_connection()
         row = conn.execute(
             """
             SELECT filepath FROM photos
-            WHERE (content_hash = ? OR processed_hash = ?) AND filepath != ?
-              AND status NOT IN (?, ?)
+            WHERE (content_hash = ? OR processed_hash = ?
+                   OR (pixel_hash IS NOT NULL AND pixel_hash = ?))
+              AND filepath != ? AND status NOT IN (?, ?)
             LIMIT 1
         """,
             (
                 content_hash,
                 content_hash,
+                pixel_hash,
                 exclude_filepath or "",
                 PhotoStatus.FAILED.value,
                 PhotoStatus.DUPLICATE.value,
             ),
         ).fetchone()
+        if row:
+            return row["filepath"]
+
+        candidates = [h for h in (content_hash, pixel_hash) if h]
+        placeholders = ",".join("?" * len(candidates))
+        row = conn.execute(
+            f"""
+            SELECT filepath FROM known_content
+            WHERE hash IN ({placeholders}) AND filepath != ?
+            LIMIT 1
+        """,
+            (*candidates, exclude_filepath or ""),
+        ).fetchone()
         return row["filepath"] if row else None
+
+    def remember_hashes(
+        self,
+        filepath: str,
+        content_hash: Optional[str] = None,
+        processed_hash: Optional[str] = None,
+        pixel_hash: Optional[str] = None,
+    ) -> None:
+        """Record hashes in the permanent ledger (survives cleanup_old_records)."""
+        rows = [
+            (h, kind, filepath)
+            for h, kind in (
+                (content_hash, "content"),
+                (processed_hash, "processed"),
+                (pixel_hash, "pixel"),
+            )
+            if h
+        ]
+        if not rows:
+            return
+        try:
+            with self.transaction() as conn:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO known_content (hash, kind, filepath)"
+                    " VALUES (?, ?, ?)",
+                    rows,
+                )
+        except sqlite3.Error as e:
+            logger.error(f"Failed to record hashes for {filepath}: {e}")
 
     def record_duplicate(
         self,
@@ -344,10 +424,21 @@ class ProcessingStateDB:
         row = result.fetchone()
         return dict(row) if row else None
 
+    @staticmethod
+    def _utc_cutoff(**delta: float) -> datetime:
+        """Naive-UTC cutoff for comparing against sqlite's CURRENT_TIMESTAMP.
+
+        Every timestamp column is written by CURRENT_TIMESTAMP, which is UTC.
+        Comparing those against a local-time cutoff skews every age check by
+        the UTC offset - east of UTC that makes freshly-locked photos look
+        stuck, which would let doctor reset rows a worker is still using.
+        """
+        return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(**delta)
+
     def get_stuck_photos(self, timeout_minutes: int = 5) -> List[str]:
         """Find photos that have been locked for too long."""
         conn = self._get_connection()
-        cutoff = datetime.now() - timedelta(minutes=timeout_minutes)
+        cutoff = self._utc_cutoff(minutes=timeout_minutes)
         result = conn.execute(
             """
             SELECT filepath FROM photos 
@@ -371,7 +462,7 @@ class ProcessingStateDB:
     def unlock_stuck_photos(self, timeout_minutes: int = 5) -> int:
         """Reset photos that have been stuck mid-pipeline for too long."""
         with self.transaction() as conn:
-            cutoff = datetime.now() - timedelta(minutes=timeout_minutes)
+            cutoff = self._utc_cutoff(minutes=timeout_minutes)
             placeholders = ",".join("?" * len(self.STUCK_STATUSES))
             result = conn.execute(
                 f"""
@@ -565,11 +656,11 @@ class ProcessingStateDB:
     def cleanup_old_records(self, days: int = 30) -> int:
         """Remove old completed records.
 
-        Note: this also forgets the content hashes of those photos, so a copy
-        re-synced after cleanup will be processed (and uploaded) again.
+        Dedup survives this: the hashes live on in known_content, which is
+        never garbage-collected.
         """
         with self.transaction() as conn:
-            cutoff = datetime.now() - timedelta(days=days)
+            cutoff = self._utc_cutoff(days=days)
             result = conn.execute(
                 """
                 DELETE FROM photos
