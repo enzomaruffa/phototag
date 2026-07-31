@@ -25,8 +25,8 @@ class OpenAIService(AIService):
 
     def __init__(self, api_key: str, model: Optional[str] = None):
         self.client = AsyncOpenAI(api_key=api_key)
-        # OPENAI_MODEL env var overrides; gpt-4o-mini is ~15x cheaper than gpt-4o
-        # and plenty for rating/tagging - set OPENAI_MODEL=gpt-4o for max quality
+        # OPENAI_MODEL env var overrides; gpt-4o-mini is ~1.7x cheaper than gpt-5.6-luna
+        # and plenty for rating/tagging - set OPENAI_MODEL=gpt-5.6-luna for max quality
         self.model = model or os.getenv("OPENAI_MODEL", self.DEFAULT_MODEL)
 
     def _encode_image(self, image_path: Path) -> tuple:
