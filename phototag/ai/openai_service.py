@@ -21,12 +21,11 @@ from ..models.ai import AIAnalysisResponse
 class OpenAIService(AIService):
     """OpenAI implementation for photo analysis."""
 
-    DEFAULT_MODEL = "gpt-4o-mini"
+    DEFAULT_MODEL = "gpt-6-luna"
 
     def __init__(self, api_key: str, model: Optional[str] = None):
         self.client = AsyncOpenAI(api_key=api_key)
-        # OPENAI_MODEL env var overrides; gpt-4o-mini is ~1.7x cheaper than gpt-5.6-luna
-        # and plenty for rating/tagging - set OPENAI_MODEL=gpt-5.6-luna for max quality
+        # OPENAI_MODEL env var overrides the default.
         self.model = model or os.getenv("OPENAI_MODEL", self.DEFAULT_MODEL)
 
     def _encode_image(self, image_path: Path) -> tuple:
