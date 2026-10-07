@@ -193,8 +193,7 @@ EXAMPLES OF TAG REUSE (prefer existing):
                             ],
                         }
                     ],
-                    max_tokens=500,
-                    temperature=0.1,
+                    max_completion_tokens=2000,
                     # Guarantees syntactically valid JSON - no markdown fences,
                     # no parse-failure retries
                     response_format={"type": "json_object"},
