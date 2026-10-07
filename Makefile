@@ -1,13 +1,23 @@
 WORKERS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help setup process watch retry review upload sync-hashes status failed doctor fmt lint typecheck check
+.PHONY: help setup card import process watch retry review upload sync-hashes status failed doctor fmt lint typecheck check
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
 setup: ## Install dependencies
 	uv sync
+
+card: ## SD card → inbox → dedup → AI → tag review → Immich upload, in one go. ALBUM="name" optional
+	-uv run phototag immich-sync
+	uv run phototag import-card
+	uv run phototag process --workers $(WORKERS)
+	uv run phototag review-tags
+	uv run phototag upload $(if $(ALBUM),--album "$(ALBUM)")
+
+import: ## Copy new photos/videos from an SD card into the inbox (asks which card)
+	uv run phototag import-card
 
 process: ## Analyze inbox photos with AI (videos pass straight through). WORKERS=4
 	uv run phototag process --workers $(WORKERS)
