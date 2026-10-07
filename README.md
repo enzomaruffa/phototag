@@ -17,7 +17,9 @@ inbox/ ──▶ [dedup check] ──▶ [AI analysis + EXIF] ──▶ processe
 make setup            # install dependencies (uv)
 cp .env.example .env  # then fill in OPENAI_API_KEY + Immich SSH settings
 
-# Drop photos/videos into inbox/, then:
+make card             # SD card → inbox → dedup → AI → tag review → Immich, all in a row
+
+# Or step by step — drop photos/videos into inbox/ (or `make import`), then:
 make process          # AI-analyze photos, pass videos through
 make review           # approve/reject new AI-suggested tags
 make upload           # upload processed/ to Immich, move to outbox/
@@ -27,6 +29,8 @@ make upload           # upload processed/ to Immich, move to outbox/
 
 | Target | What it does |
 |---|---|
+| `make card` | Full run from an SD card: sync Immich checksums, import, process, review tags, upload (`ALBUM=` optional) |
+| `make import` | Pick a mounted SD card and copy its new photos/videos into the inbox |
 | `make process` | Analyze inbox photos with AI (`WORKERS=4` to override) |
 | `make watch` | Watch the inbox and auto-process new files as they arrive |
 | `make retry` | Re-queue failed photos and process them again |

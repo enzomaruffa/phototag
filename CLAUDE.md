@@ -6,6 +6,8 @@ AI photo tagging + Immich upload pipeline: `inbox/ → (dedup check) → AI anal
 
 Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 
+- `make card` — sync-hashes → import-card → process → review → upload in one go
+- `make import` — `phototag import-card`: pick a removable volume, hash files on the card, copy only unknown ones to `inbox/<volume>-<date>/` (`phototag/card.py`)
 - `make process` / `make watch` / `make retry` — analyze inbox (watch = polling loop)
 - `make review` — approve/reject AI-suggested tags, backfills EXIF afterwards
 - `make upload` — Immich upload over an SSH tunnel, then move to outbox

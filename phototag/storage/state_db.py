@@ -714,6 +714,24 @@ class ProcessingStateDB:
 
         return photos
 
+    def has_unhashed_processed(self, filename: str) -> bool:
+        """True if a processed photo with this filename has no content hash.
+
+        Photos processed before intake hashing existed can't be matched by
+        find_duplicate(), so callers fall back to comparing the files themselves.
+        """
+        conn = self._get_connection()
+        row = conn.execute(
+            """
+            SELECT 1 FROM photos
+            WHERE content_hash IS NULL AND status = ?
+              AND (filepath = ? OR filepath LIKE ?)
+            LIMIT 1
+        """,
+            (PhotoStatus.PROCESSED.value, filename, f"%/{filename}"),
+        ).fetchone()
+        return row is not None
+
     def get_dated_siblings(self, dir_prefix: str) -> List[tuple]:
         """(filepath, capture_date, capture_date_source) for resolved photos
         whose ORIGINAL inbox path lives directly under dir_prefix.

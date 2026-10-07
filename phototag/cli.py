@@ -22,6 +22,13 @@ from rich.progress import (
 )
 from dotenv import load_dotenv
 
+from phototag.card import (
+    copy_to_inbox,
+    eject,
+    find_card_media,
+    find_removable_volumes,
+    is_known,
+)
 from phototag.media import (
     file_hashes,
     find_media_files,
@@ -483,6 +490,102 @@ def immich_sync():
     except Exception as e:
         console.print(f"❌ Sync failed: {e}", style="red")
         raise typer.Exit(1)
+
+
+@app.command()
+def import_card(
+    volume: Optional[Path] = typer.Argument(
+        None, help="Card mount point (asks which one when omitted)"
+    ),
+):
+    """Copy new photos/videos from a memory card into the inbox.
+
+    Files are hashed on the card first and skipped when they're already known
+    (in the pipeline, processed, or in Immich), so re-inserting a card only
+    copies what was shot since the last import.
+    """
+    if volume is None:
+        volumes = find_removable_volumes()
+        if not volumes:
+            console.print("❌ No SD card or removable drive mounted", style="red")
+            raise typer.Exit(1)
+
+        table = Table()
+        table.add_column("#")
+        table.add_column("Volume")
+        table.add_column("Size", justify="right")
+        table.add_column("Photos", justify="right")
+        table.add_column("Videos", justify="right")
+        for i, vol in enumerate(volumes, 1):
+            media = find_card_media(vol.path)
+            videos = sum(1 for f in media if is_video(f))
+            table.add_row(
+                str(i),
+                f"{vol.name} ({vol.path})",
+                f"{vol.size_bytes / 1e9:.0f} GB",
+                str(len(media) - videos),
+                str(videos),
+            )
+        console.print(table)
+        choice = Prompt.ask(
+            "Which card has the photos?",
+            choices=[str(i) for i in range(1, len(volumes) + 1)],
+            default="1",
+        )
+        volume = volumes[int(choice) - 1].path
+
+    if not volume.is_dir():
+        console.print(f"❌ Not a directory: {volume}", style="red")
+        raise typer.Exit(1)
+
+    media = find_card_media(volume)
+    if not media:
+        console.print(f"ℹ️  No photos or videos on {volume}")
+        return
+
+    # One folder per card per day keeps camera folders (and their filename
+    # sequences, which capture-date inference relies on) intact.
+    inbox_dir = Path(os.getenv("INBOX_DIR", "./inbox"))
+    dest_root = inbox_dir / f"{volume.name}-{time.strftime('%Y-%m-%d')}"
+    state_db = ProcessingStateDB()
+    exif = EXIFHandler()
+
+    copied = known = resumed = 0
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task(
+            "Checking card", total=sum(f.stat().st_size for f in media)
+        )
+        for src in media:
+            size = src.stat().st_size
+            dest = dest_root / src.relative_to(volume)
+            progress.update(task, description=src.name)
+            if dest.exists() and dest.stat().st_size == size:
+                resumed += 1
+            elif is_known(src, state_db, exif):
+                known += 1
+            else:
+                copy_to_inbox(src, dest)
+                copied += 1
+            progress.advance(task, size)
+
+    console.print(
+        f"✅ Copied {copied} new files to {dest_root}"
+        f" ({known} already known, {resumed} already in the inbox)"
+    )
+
+    if volume.parent == Path("/Volumes") and Confirm.ask(
+        f"Eject {volume.name}?", default=True
+    ):
+        if eject(volume):
+            console.print(f"⏏️  Ejected {volume.name}")
+        else:
+            console.print(f"⚠️  Could not eject {volume.name}", style="yellow")
 
 
 @app.command()
