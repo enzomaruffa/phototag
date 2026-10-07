@@ -5,6 +5,7 @@ import logging
 import shutil
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict
 import multiprocessing
@@ -12,13 +13,17 @@ import multiprocessing
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.logging import RichHandler
 from rich.prompt import Confirm, Prompt
 from rich.progress import (
     Progress,
     SpinnerColumn,
     TextColumn,
     BarColumn,
+    MofNCompleteColumn,
     TaskProgressColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 from dotenv import load_dotenv
 
@@ -40,20 +45,21 @@ from phototag.storage.tag_review import TagReviewStorage
 from phototag.storage.exif import EXIFHandler
 from phototag.storage.immich import ImmichUploader, read_cli_api_key
 from phototag.storage.state_db import ProcessingStateDB, PhotoStatus
-from phototag.processing.photo_processor import PhotoProcessor
+from phototag.processing.photo_processor import PhotoProcessor, quiet_http_logs
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging to show messages on console
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s: %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-
 app = typer.Typer(help="AI-powered photo tagging and upload system for Immich")
 console = Console()
+
+# Log through the rich console so messages print above live progress bars
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    handlers=[RichHandler(console=console, show_time=False, show_path=False)],
+)
+quiet_http_logs()
 
 
 def move_photos(photo_files: List[Path], destination_dir: Path) -> int:
@@ -71,6 +77,27 @@ def move_photos(photo_files: List[Path], destination_dir: Path) -> int:
             console.print(f"⚠️  Failed to move {photo_path.name}: {e}", style="yellow")
 
     return moved_count
+
+
+IN_FLIGHT_STATUSES = {
+    status.value
+    for status in (
+        PhotoStatus.PENDING,
+        PhotoStatus.LOCKED,
+        PhotoStatus.AI_ANALYZING,
+        PhotoStatus.AI_ANALYZED,
+        PhotoStatus.EXIF_WRITING,
+        PhotoStatus.EXIF_WRITTEN,
+        PhotoStatus.MOVING,
+    )
+}
+
+
+def short_error(message: Optional[str], limit: int = 160) -> str:
+    """One line of a stored error, without the retry wrapper text."""
+    text = (message or "unknown error").split("Last error: ")[-1]
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 @app.command()
@@ -201,27 +228,50 @@ def process(
     console.print(f"\n🚀 Starting processing with {workers} workers...")
     console.print("Press Ctrl+C to safely interrupt\n")
 
+    run_started_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    monitor_db = ProcessingStateDB()
+    reported_failures: set = set()
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
-        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task(
-            f"Processing photos with {workers} workers...",
-            total=None,  # Indeterminate progress
-        )
+        task = progress.add_task("Checking inbox for duplicates...", total=None)
 
         def update_progress(stats):
             processed = stats.get(PhotoStatus.PROCESSED.value, 0)
             failed = stats.get(PhotoStatus.FAILED.value, 0)
             awaiting = stats.get(PhotoStatus.AWAITING_TAG_REVIEW.value, 0)
-
+            done = processed + failed + awaiting
+            queued = sum(
+                count
+                for status, count in monitor_db.get_statistics().items()
+                if status in IN_FLIGHT_STATUSES
+            )
             progress.update(
                 task,
-                description=f"Processed: {processed} | Awaiting tags: {awaiting} | Failed: {failed}",
+                total=done + queued,
+                completed=done,
+                description=f"✅ {processed}  🏷️ {awaiting}  ❌ {failed}",
             )
+
+            for photo in monitor_db.get_failed_photos():
+                name = photo["filepath"]
+                if (photo["error_at"] or "") < run_started_utc or (
+                    name in reported_failures
+                ):
+                    continue
+                reported_failures.add(name)
+                progress.console.print(
+                    f"❌ {Path(name).name}: {short_error(photo['error_message'])}",
+                    style="red",
+                    highlight=False,
+                )
 
         # Run processing
         results = processor.process_batch(
@@ -406,10 +456,8 @@ def upload(
             console.print("🔗 SSH tunnel established")
 
             def retry_callback() -> bool:
-                """Ask user if they want to retry after connection failure."""
-                return Confirm.ask(
-                    "⚠️  Connection lost during upload. Retry?", default=True
-                )
+                """Ask user if they want to retry after a failed upload."""
+                return Confirm.ask("⚠️  Upload failed. Retry?", default=True)
 
             success = uploader.upload_photos(
                 photo_dir=source_dir, album_name=album, retry_callback=retry_callback

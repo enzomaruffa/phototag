@@ -23,6 +23,22 @@ from ..models.ai import AIAnalysisResponse
 logger = logging.getLogger(__name__)
 
 
+def quiet_http_logs():
+    """Hide the per-request INFO lines from the OpenAI client."""
+    for name in ("httpx", "openai"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def _init_worker():
+    """Workers write straight to the terminal, outside the parent's progress bar.
+
+    Only warnings get through; per-photo failures are stored in the state DB
+    and reported by the parent.
+    """
+    logging.getLogger().setLevel(logging.WARNING)
+    quiet_http_logs()
+
+
 # Module-level worker function to avoid pickling issues
 def process_worker_function(
     worker_id: str,
@@ -71,7 +87,7 @@ def process_worker_function(
                 results["failed"] += 1
 
         except Exception as e:
-            logger.error(f"Worker {worker_id} error processing {photo_path}: {e}")
+            logger.debug(f"Worker {worker_id} error processing {photo_path}: {e}")
             state_db.update_photo_status(
                 photo_path, PhotoStatus.FAILED, {"error": str(e)}
             )
@@ -295,7 +311,7 @@ def process_single_photo(
         return PhotoStatus.FAILED
 
     except Exception as e:
-        logger.error(f"Error processing {photo_path}: {e}")
+        logger.debug(f"Error processing {photo_path}: {e}")
         state_db.update_photo_status(filepath, PhotoStatus.FAILED, {"error": str(e)})
         return PhotoStatus.FAILED
 
@@ -453,7 +469,9 @@ class PhotoProcessor:
         run_started_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         results["started_at"] = run_started_utc
 
-        with ProcessPoolExecutor(max_workers=self.worker_count) as executor:
+        with ProcessPoolExecutor(
+            max_workers=self.worker_count, initializer=_init_worker
+        ) as executor:
             # Submit initial workers - pass only serializable data
             futures = []
             for i in range(self.worker_count):
