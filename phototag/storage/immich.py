@@ -2,11 +2,12 @@
 
 import base64
 import os
+import socket
 import subprocess
 import time
 import requests
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import Callable, List, Optional, Tuple
 import logging
 
 
@@ -29,6 +30,37 @@ def read_cli_api_key() -> Optional[str]:
     return None
 
 
+def _ssh_endpoint(config_name: str) -> Optional[Tuple[str, int]]:
+    """Hostname and port an ~/.ssh/config entry resolves to."""
+    try:
+        out = subprocess.run(
+            ["ssh", "-G", config_name], capture_output=True, text=True, timeout=5
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    opts = dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
+    if "hostname" not in opts:
+        return None
+    return opts["hostname"], int(opts.get("port", "22"))
+
+
+def pick_reachable_host(config_names: List[str]) -> str:
+    """First SSH config entry that accepts a TCP connection, else the last one.
+
+    Lets a LAN entry come first and a remote one act as the fallback.
+    """
+    for name in config_names[:-1]:
+        endpoint = _ssh_endpoint(name)
+        if endpoint is None:
+            continue
+        try:
+            socket.create_connection(endpoint, timeout=1.5).close()
+            return name
+        except OSError:
+            logging.info(f"{name} not reachable, trying the next SSH host")
+    return config_names[-1]
+
+
 class ImmichUploader:
     """Manages SSH tunnel and Immich uploads."""
 
@@ -40,7 +72,9 @@ class ImmichUploader:
         local_port: int = 2283,
     ):
         if ssh_config_name:
-            self.ssh_target = ssh_config_name
+            self.ssh_target = pick_reachable_host(
+                [h.strip() for h in ssh_config_name.split(",") if h.strip()]
+            )
         elif server_host and server_user:
             self.ssh_target = f"{server_user}@{server_host}"
         else:

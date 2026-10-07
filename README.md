@@ -59,7 +59,7 @@ Set in `.env` (see `.env.example`):
 | `OPENAI_API_KEY` | Required for photo analysis |
 | `OPENAI_MODEL` | Vision model (default `gpt-4o-mini`; set `gpt-5.6-luna` for max quality at ~1.7× the cost) |
 | `INBOX_DIR` / `PROCESSED_DIR` / `OUTBOX_DIR` | Pipeline directories (default `./inbox`, `./processed`, `./outbox`) |
-| `IMMICH_SSH_CONFIG_NAME` | SSH config entry for the Immich server tunnel |
+| `IMMICH_SSH_CONFIG_NAME` | SSH config entry for the Immich server tunnel. A comma list (`home-lan,home-remote`) uses the first one that answers |
 | `IMMICH_SERVER_HOST` + `IMMICH_SERVER_USER` | Alternative to the SSH config entry |
 | `IMMICH_API_KEY` | Optional — `immich-sync` reuses the key stored by `immich login`; set this only to override it |
 
