@@ -242,43 +242,27 @@ class ImmichUploader:
                 cmd = ["immich", "upload", str(photo_dir)]
 
                 if album_name:
-                    cmd.extend(["--album", album_name])
+                    cmd.extend(["--album-name", album_name])
 
                 logging.info(
                     f"Starting upload (attempt {retry_count + 1}/{max_retries})"
                 )
 
-                # Run upload with monitoring
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=3600,  # 1 hour timeout
-                )
+                # Output goes straight to the terminal: the CLI draws its
+                # hashing/upload progress bars on stderr
+                result = subprocess.run(cmd, timeout=3600)
 
                 if result.returncode == 0:
                     logging.info(f"Successfully uploaded photos from {photo_dir}")
                     return True
-                else:
-                    # Check if failure was due to connection issue
-                    error_msg = result.stderr.lower()
-                    if any(
-                        keyword in error_msg
-                        for keyword in ["connection", "network", "timeout", "refused"]
-                    ):
-                        logging.warning(
-                            f"Upload failed due to connection issue: {result.stderr}"
-                        )
-                        if retry_count < max_retries - 1 and retry_callback:
-                            if retry_callback():
-                                retry_count += 1
-                                continue
-                            else:
-                                logging.info("User chose not to retry")
-                                return False
 
-                    logging.error(f"Upload failed: {result.stderr}")
-                    return False
+                logging.error(f"Upload failed (immich exit {result.returncode})")
+                if retry_count < max_retries - 1 and retry_callback:
+                    if retry_callback():
+                        retry_count += 1
+                        continue
+                    logging.info("User chose not to retry")
+                return False
 
             except subprocess.TimeoutExpired:
                 logging.error("Upload timed out")
