@@ -1,7 +1,7 @@
 WORKERS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help setup card import process watch retry review upload sync-hashes status failed doctor fmt lint typecheck check
+.PHONY: help setup card import drive-export process watch retry review upload sync-hashes status failed doctor fmt lint typecheck check
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -18,6 +18,9 @@ card: ## SD card → inbox → dedup → AI → tag review → Immich upload, in
 
 import: ## Copy new photos/videos from an SD card into the inbox (asks which card)
 	uv run phototag import-card
+
+drive-export: ## Finished photos as JPEGs in one folder per rating. OUT=dir SINCE/UNTIL="YYYY-MM-DD[ HH:MM]"
+	uv run python scripts/drive_export.py $(if $(OUT),--out "$(OUT)") $(if $(SINCE),--since "$(SINCE)") $(if $(UNTIL),--until "$(UNTIL)")
 
 process: ## Analyze inbox photos with AI (videos pass straight through). WORKERS=4
 	uv run phototag process --workers $(WORKERS)
