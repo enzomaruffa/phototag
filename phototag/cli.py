@@ -627,9 +627,7 @@ def import_card(
         f" ({known} already known, {resumed} already in the inbox)"
     )
 
-    if volume.parent == Path("/Volumes") and Confirm.ask(
-        f"Eject {volume.name}?", default=True
-    ):
+    if volume.parent == Path("/Volumes"):
         if eject(volume):
             console.print(f"⏏️  Ejected {volume.name}")
         else:
