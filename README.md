@@ -29,7 +29,8 @@ make upload           # upload processed/ to Immich, move to outbox/
 
 | Target | What it does |
 |---|---|
-| `make card` | Full run from an SD card: sync Immich checksums, import, match stacks, process, review tags, upload (`ALBUM=` optional) |
+| `make card` | Full run from an SD card: sync Immich checksums, import (while receiving manifests from the phone), match stacks, process, review tags, upload (`ALBUM=` optional) |
+| `make receive` | Accept sequence manifests pushed by Open Alpha Link over the local network, and print the pairing QR code |
 | `make stacks` | Import sequence manifests, match their frames to inbox photos, list them |
 | `make stacks-export` | Copy each stack into its own folder for focus-stacking software (`OUT=dir`, `KIND=` optional) |
 | `make import` | Pick a mounted SD card and copy its new photos/videos into the inbox |
@@ -64,7 +65,8 @@ Set in `.env` (see `.env.example`):
 | `IMMICH_SSH_CONFIG_NAME` | SSH config entry for the Immich server tunnel. A comma list (`home-lan,home-remote`) uses the first one that answers |
 | `IMMICH_SERVER_HOST` + `IMMICH_SERVER_USER` | Alternative to the SSH config entry |
 | `IMMICH_API_KEY` | Optional — `immich-sync` reuses the key stored by `immich login`; set this only to override it |
-| `SEQUENCE_MANIFEST_DIR` | Folders holding Open Alpha Link sequence manifests, comma list allowed (default: the app's iCloud Drive folder, `~/Library/Mobile Documents/iCloud~dev~enzomaruffa~openalphalink/Documents/Sequences`). Manifests dropped anywhere in the inbox are read too |
+| `SEQUENCE_MANIFEST_DIR` | Extra folders holding Open Alpha Link sequence manifests, comma list allowed (default: none). Manifests received by `phototag receive` (`.phototag/manifests/`) and dropped anywhere in the inbox are always read |
+| `PHOTOTAG_RECEIVE_PORT` | Port `phototag receive` listens on (default `8765`; a free port is picked when it's taken, since the app finds it over Bonjour) |
 | `STACK_MAX_CLOCK_SKEW_SECONDS` | Largest camera-vs-phone clock difference the stack matcher searches (default `120`) |
 
 `phototag config` shows what's set and what's missing.
@@ -99,7 +101,9 @@ Names go into the description and become snake_case keywords (`mona_lisa`, `eiff
 
 [Open Alpha Link](docs/SEQUENCE_MANIFEST.md) is an iOS remote for Sony bodies. Every multi-shot run (focus stack, exposure bracket, intervalometer, burst, bulb) writes a JSON manifest with the phone time of each shutter press. The camera can't tell us which files belong together, so phototag matches photos to those presses.
 
-**Getting manifests in.** `phototag stacks match` reads manifests from `SEQUENCE_MANIFEST_DIR` (the app's iCloud Drive folder by default) and from anywhere in the inbox, so AirDropping a manifest into `inbox/` works too. Other JSON files are ignored, and the inbox scan for photos never looks at JSON. Re-importing a manifest is a no-op, except that edited annotations replace the stored ones. If a stack's photos were already processed, `stacks match` warns and leaves those files alone.
+**Getting manifests in.** The app pushes each manifest straight to the Mac over the home network. `make receive` (`phototag receive`) starts a small server that advertises itself over Bonjour as `_phototag._tcp` and saves what it gets to `.phototag/manifests/<id>.json`. On first run it prints a pairing code and a QR code; scan the QR with the iPhone Camera (or type the code under Mac Sync in the app), and the app only needs that once. `make card` runs the receiver in the background while the card copies, so runs pushed meanwhile are matched too. There is no cloud and no iCloud step. The API is in [docs/SEQUENCE_MANIFEST.md](docs/SEQUENCE_MANIFEST.md).
+
+`phototag stacks match` reads the received manifests, any `SEQUENCE_MANIFEST_DIR` folders and anywhere in the inbox, so AirDropping a manifest into `inbox/` works too. Other JSON files are ignored, and the inbox scan for photos never looks at JSON. Re-importing a manifest is a no-op, except that edited annotations replace the stored ones. If a stack's photos were already processed, `stacks match` warns and leaves those files alone.
 
 **Matching.** The camera clock is set by hand, so phototag searches for the clock offset (up to `STACK_MAX_CLOCK_SKEW_SECONDS`, default 120 s) that puts the most photos inside a press, with 1.5 s of tolerance. A RAW+JPEG pair and the images of one held press all belong to the same frame. A sequence counts as matched when at least 80% of its frames got a photo. Sequences whose photos aren't in the inbox yet stay unmatched and are retried on the next run. `make card` runs `stacks match` right after the card import.
 

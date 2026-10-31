@@ -6,7 +6,8 @@ AI photo tagging + Immich upload pipeline: `inbox/ → (dedup check) → AI anal
 
 Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 
-- `make card` — sync-hashes → import-card → stacks match → process → review → upload in one go
+- `make card` — sync-hashes → import-card (with `phototag receive` in the background) → stacks match → process → review → upload in one go
+- `make receive` — `phototag receive`: LAN server (FastAPI + uvicorn, Bonjour `_phototag._tcp` via zeroconf) that accepts manifests pushed by Open Alpha Link into `.phototag/manifests/`. Pairing code in `.phototag/receiver.json`
 - `make import` — `phototag import-card`: pick a removable volume, hash files on the card, copy only unknown ones to `inbox/<volume>-<date>/` (`phototag/card.py`)
 - `make process` / `make watch` / `make retry` — analyze inbox (watch = polling loop)
 - `make review` — approve/reject AI-suggested tags, backfills EXIF afterwards
@@ -27,6 +28,7 @@ Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 - `phototag/ai/openai_service.py` — vision analysis, JSON-mode responses, retry with backoff
 - `phototag/media.py` — extension sets, `file_hashes()`, `is_stable()`, `unique_destination()`
 - `phototag/stacks.py` — pure manifest parsing and the frame-matching algorithm from `docs/SEQUENCE_MANIFEST.md` (the contract with the iOS app; don't change its format)
+- `phototag/receiver.py` — the manifest receiver: pairing code, HTTP API (`PUT/GET /v1/manifests`, bearer code), Bonjour advert, QR
 - `phototag/stack_ops.py` — stack workflows over the DB: manifest import, inbox matching, per-member context for processing, Immich stacks/albums, export
 - `phototag/dating.py` — capture-date inference for dateless sources (toy cams, film scans): printed-stamp parsing, neighbour anchors, filename-sequence offsets, and the AI source-class prompt hint
 

@@ -4,8 +4,24 @@ Every multi-shot run (focus stack, bracket, intervalometer, burst, bulb) writes 
 
 ## Where it is written
 
-- `Documents/Sequences/` in the app container, visible in the Files app under On My iPhone → Open Alpha Link → Sequences. Always written.
-- `Documents/Sequences/` in the iCloud container `iCloud.dev.enzomaruffa.openalphalink` when iCloud Drive is available. On a Mac signed into the same Apple ID it appears at `~/Library/Mobile Documents/iCloud~dev~enzomaruffa~openalphalink/Documents/Sequences/`.
+- `Documents/Sequences/` in the app container, visible in the Files app under On My iPhone → Open Alpha Link → Sequences. Always written. Each History row can also share the file, for AirDrop.
+- Pushed to `phototag receive` on a Mac on the same network, once the app is paired with it. Nothing goes through the internet or iCloud.
+
+### Push to phototag over the local network
+
+`phototag receive` serves HTTP on the LAN (port 8765 by default, or a free port when that one is taken) and advertises it over Bonjour as `_phototag._tcp`, named `phototag on <host>`, with TXT records `v=1` and `path=/v1`. The app browses for that service and resolves it, so the port never has to be typed.
+
+On first run phototag generates a pairing code (6 groups of 4 letters and digits) and prints it with a QR code of `phototag://pair?code=<code>&port=<port>`. Scanning it with the iPhone Camera opens the app and pairs it; the code can also be typed under Mac Sync. Every request except `/healthz` carries `Authorization: Bearer <code>`. Dashes, spaces and case don't matter.
+
+| Route | What it does |
+| --- | --- |
+| `GET /healthz` | `{"ok": true}`. No code needed. |
+| `GET /v1/manifests` | `{"manifests": [{"id": "<id>", "sha256": "<hex>"}]}`, one entry per manifest held. `sha256` is of the stored bytes. |
+| `PUT /v1/manifests/{id}` | The manifest file's bytes as the body, at most 1 MB. phototag checks `format`, `version` and that `id` matches the path, then writes the body as-is. `201` when new, `200` when updated or unchanged, with `{"id", "status": "created" \| "updated" \| "unchanged", "sha256"}`. |
+
+Errors: `401` for a missing or wrong code, `400` for a path that isn't a UUID or a body that isn't JSON, `413` over 1 MB, `422` for anything that isn't a version 1 manifest for that id.
+
+The app lists first and PUTs every manifest whose SHA-256 differs from what the receiver holds, so an edit to the annotations is sent again and an unchanged manifest isn't. It remembers what each receiver acknowledged, and History shows each run as Sent to <Mac>, Waiting for phototag or Not paired. It syncs on launch, when it comes to the foreground, after every saved run and after every annotation edit, whenever a receiver is visible.
 
 File name: `<local start yyyyMMdd-HHmmss>-<kind>-<first 8 chars of id>.json`, for example `20261031-140322-focus_stack-3f9a1c2e.json`. The manifest is written when the run ends (completed, cancelled or failed). It is rewritten in place, under the same name and `id`, only when the user edits its `annotations` afterwards; the frames never change. Readers key on `id` and keep the newest content.
 
