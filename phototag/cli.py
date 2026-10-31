@@ -1135,6 +1135,16 @@ def stacks_match():
         f"📥 {summary.imported} new manifests imported"
         f" ({summary.already_known} already known)"
     )
+    if summary.updated:
+        console.print(
+            f"✏️  Picked up edited annotations for {len(summary.updated)} sequences"
+        )
+    for sequence_id in summary.edited_after_processing:
+        console.print(
+            f"⚠️  Sequence {sequence_id[:8].lower()} was edited after its photos were"
+            " processed - files already written keep the old annotations",
+            style="yellow",
+        )
     match_inbox(state_db, inbox_dir, max_clock_skew(), summary=summary)
     if summary.matched:
         console.print(f"🧱 Matched {len(summary.matched)} sequences to inbox photos")

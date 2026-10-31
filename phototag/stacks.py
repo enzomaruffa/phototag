@@ -39,6 +39,50 @@ class Frame:
 
 
 @dataclass(frozen=True)
+class Annotations:
+    """What the user typed on the phone. Every field is optional."""
+
+    title: Optional[str] = None
+    notes: Optional[str] = None
+    subject: Optional[str] = None
+    tags: Tuple[str, ...] = ()
+    album: Optional[str] = None
+    lens: Optional[str] = None
+
+
+def parse_annotations(data: Any) -> Annotations:
+    if not isinstance(data, dict):
+        return Annotations()
+
+    def text(key: str) -> Optional[str]:
+        value = data.get(key)
+        return str(value).strip() or None if value is not None else None
+
+    tags = data.get("tags") or []
+    return Annotations(
+        title=text("title"),
+        notes=text("notes"),
+        subject=text("subject"),
+        tags=tuple(t for t in (str(tag).strip().lower() for tag in tags if tag) if t)
+        if isinstance(tags, list)
+        else (),
+        album=text("album"),
+        lens=text("lens"),
+    )
+
+
+def _plan_value(key: str, value: Any) -> Optional[str]:
+    if isinstance(value, bool):
+        return key.replace("_", " ") if value else None
+    if isinstance(value, str):
+        return value or None
+    for suffix, unit in (("_ms", "ms"), ("_s", "s")):
+        if key.endswith(suffix):
+            return f"{key[: -len(suffix)].replace('_', ' ')} {value} {unit}"
+    return f"{key.replace('_', ' ')} {value}"
+
+
+@dataclass(frozen=True)
 class Manifest:
     id: str
     kind: str
@@ -49,6 +93,8 @@ class Manifest:
     camera_model: Optional[str]
     expected_images: Optional[int]
     frames: Tuple[Frame, ...]
+    plan: Tuple[Tuple[str, Any], ...] = ()
+    annotations: Annotations = Annotations()
 
     @property
     def short_id(self) -> str:
@@ -58,6 +104,24 @@ class Manifest:
     def tags(self) -> List[str]:
         """Keywords every member of this sequence gets."""
         return [KIND_TAGS.get(self.kind, self.kind), f"stack_{self.short_id}"]
+
+    def plan_summary(self) -> str:
+        """'in, step 16, nudge 100 ms, settle 1500 ms' (frame count left out)."""
+        parts = [_plan_value(k, v) for k, v in self.plan if k != "frames"]
+        return ", ".join(p for p in parts if p)
+
+    def user_comment(self, frame_index: int, position: int, exposures: int) -> str:
+        """'focus_stack 7/24, in, step 16, ...' for a member's UserComment.
+
+        A single press that wrote several images (a held bracket or burst)
+        counts images instead of presses.
+        """
+        if len(self.frames) == 1 and exposures > 1:
+            where = f"{position}/{exposures}"
+        else:
+            where = f"{frame_index}/{len(self.frames)}"
+        plan = self.plan_summary()
+        return f"{self.kind} {where}" + (f", {plan}" if plan else "")
 
 
 @dataclass(frozen=True)
@@ -112,6 +176,7 @@ def parse_manifest(data: Any) -> Optional[Manifest]:
             for f in data.get("frames") or []
         )
         camera = data.get("camera") or {}
+        plan = data.get("plan")
         expected = data.get("expected_images")
         return Manifest(
             id=str(data["id"]),
@@ -123,6 +188,8 @@ def parse_manifest(data: Any) -> Optional[Manifest]:
             camera_model=camera.get("model") or None,
             expected_images=int(expected) if expected is not None else None,
             frames=tuple(sorted(frames, key=lambda f: f.index)),
+            plan=tuple(plan.items()) if isinstance(plan, dict) else (),
+            annotations=parse_annotations(data.get("annotations")),
         )
     except (KeyError, TypeError, ValueError):
         return None

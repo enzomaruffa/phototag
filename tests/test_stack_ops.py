@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 from phototag.stack_ops import import_manifests, match_inbox
 from phototag.storage.exif import EXIFHandler
-from phototag.storage.state_db import ProcessingStateDB
+from phototag.storage.state_db import PhotoStatus, ProcessingStateDB
 
 from .test_stacks import manifest_dict
 
@@ -105,3 +105,46 @@ def test_schema_migration_is_idempotent(tmp_path):
     db = ProcessingStateDB(storage_dir=tmp_path)
 
     assert db.get_sequences() == []
+
+
+ANNOTATIONS = {
+    "title": "Hornero nest, macro",
+    "notes": "Window light from the left",
+    "subject": "Rufous hornero nest",
+    "tags": ["macro"],
+    "album": "Macro 2026",
+    "lens": "Laowa 100mm f/2.8",
+}
+
+
+def test_edited_annotations_replace_the_stored_ones(tmp_path):
+    db, inbox, exif = setup(tmp_path)
+    import_manifests(db, [inbox])
+    edited = {**manifest_dict(), "annotations": ANNOTATIONS}
+    # The frames can't change; a reader keeps its own copy of them
+    edited["frames"] = edited["frames"][:1]
+    (inbox / "seq.json").write_text(json.dumps(edited))
+
+    summary = import_manifests(db, [inbox])
+
+    assert summary.updated == ["3F9A1C2E-8B1D-4C6A-9E0F-2A7B5C4D3E21"]
+    assert summary.edited_after_processing == []
+    stored = json.loads(db.get_sequences()[0]["manifest_json"])
+    assert stored["annotations"] == ANNOTATIONS
+    assert len(stored["frames"]) == 5
+
+
+def test_editing_after_processing_is_flagged(tmp_path):
+    db, inbox, exif = setup(tmp_path)
+    import_manifests(db, [inbox])
+    match_inbox(db, inbox, 120, exif=exif)
+    member = db.get_stack_members("3F9A1C2E-8B1D-4C6A-9E0F-2A7B5C4D3E21")[0]
+    db.add_photo(member["filepath"], None)
+    db.update_photo_status(member["filepath"], PhotoStatus.PROCESSED)
+    (inbox / "seq.json").write_text(
+        json.dumps({**manifest_dict(), "annotations": ANNOTATIONS})
+    )
+
+    summary = import_manifests(db, [inbox])
+
+    assert summary.edited_after_processing == ["3F9A1C2E-8B1D-4C6A-9E0F-2A7B5C4D3E21"]

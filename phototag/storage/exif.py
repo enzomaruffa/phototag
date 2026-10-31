@@ -60,6 +60,8 @@ class EXIFHandler:
         tags: List[str],
         description: str,
         notes: Optional[str] = None,
+        title: Optional[str] = None,
+        lens: Optional[str] = None,
     ) -> bool:
         """Add metadata to photo's EXIF data without overwriting existing data."""
         try:
@@ -110,6 +112,14 @@ class EXIFHandler:
                 if not existing.get("UserComment", "").strip():
                     cmd.extend([f"-UserComment={notes}"])
                     logging.info("Adding notes")
+
+            if title and not str(existing.get("Title") or "").strip():
+                cmd.extend([f"-XMP-dc:Title={title}", f"-IPTC:ObjectName={title}"])
+
+            # Manual and adapted lenses report nothing, so a typed lens name
+            # only fills the gap
+            if lens and not str(existing.get("LensModel") or "").strip():
+                cmd.extend([f"-LensModel={lens}"])
 
             # Only execute if we have something to add
             if len(cmd) > 3:  # More than just exiftool -overwrite_original

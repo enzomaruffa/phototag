@@ -900,6 +900,22 @@ class ProcessingStateDB:
             )
             return result.rowcount > 0
 
+    def get_sequence(self, sequence_id: str) -> Optional[Dict]:
+        conn = self._get_connection()
+        row = conn.execute(
+            "SELECT * FROM sequences WHERE id = ?", (sequence_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_sequence_manifest(
+        self, sequence_id: str, manifest_json: str, source_path: str
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE sequences SET manifest_json = ?, source_path = ? WHERE id = ?",
+                (manifest_json, source_path, sequence_id),
+            )
+
     def get_sequences(self, status: Optional[str] = None) -> List[Dict]:
         """Sequences with their member count, oldest first."""
         conn = self._get_connection()
@@ -969,6 +985,8 @@ class ProcessingStateDB:
             """
             SELECT m.sequence_id, m.frame_index, m.position, m.is_representative,
                    s.manifest_json, r.filepath AS representative,
+                   (SELECT MAX(position) FROM stack_members x
+                    WHERE x.sequence_id = m.sequence_id) AS exposures,
                    rp.ai_response_json AS representative_ai_response_json
             FROM stack_members m
             JOIN sequences s ON s.id = m.sequence_id

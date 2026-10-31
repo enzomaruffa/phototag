@@ -17,6 +17,7 @@ class AIService(ABC):
         image_path: Path,
         existing_tags: Optional[List[str]] = None,
         capture_ctx: Optional[CaptureContext] = None,
+        subject_hint: Optional[str] = None,
     ) -> AIAnalysisResponse:
         """Analyze a photo and return structured response."""
         pass

@@ -245,3 +245,53 @@ def test_paths_survive_as_given():
     shot = Shot(str(Path("inbox") / "x.JPG"), LOCAL_START, "ILCE-7M3")
 
     assert list(match_sequence(manifest, [shot], 120).assignments) == ["inbox/x.JPG"]
+
+
+DOC_PLAN = {
+    "frames": 24,
+    "direction": "in",
+    "step": 16,
+    "nudge_ms": 100,
+    "settle_ms": 1500,
+    "autofocus": False,
+}
+
+
+def test_user_comment_matches_the_contract_example():
+    manifest = parse({**manifest_dict(frames=24), "plan": DOC_PLAN})
+
+    assert (
+        manifest.user_comment(7, 7, 24)
+        == "focus_stack 7/24, in, step 16, nudge 100 ms, settle 1500 ms"
+    )
+
+
+def test_user_comment_counts_images_for_a_single_held_press():
+    manifest = parse(
+        {**manifest_dict(frames=1, kind="exposure_bracket"), "plan": {"frames": 5}}
+    )
+
+    assert manifest.user_comment(1, 3, 5) == "exposure_bracket 3/5"
+
+
+def test_annotations_are_optional_and_normalized():
+    bare = parse(manifest_dict())
+    full = parse(
+        {
+            **manifest_dict(),
+            "annotations": {
+                "title": " Hornero nest ",
+                "notes": None,
+                "subject": "",
+                "tags": ["Macro", " nature ", ""],
+                "album": "Macro 2026",
+                "lens": "Laowa 100mm",
+            },
+        }
+    )
+
+    assert bare.annotations.title is None and bare.annotations.tags == ()
+    assert full.annotations.title == "Hornero nest"
+    assert full.annotations.notes is None and full.annotations.subject is None
+    assert full.annotations.tags == ("macro", "nature")
+    assert full.annotations.album == "Macro 2026"

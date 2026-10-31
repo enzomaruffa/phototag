@@ -72,3 +72,10 @@ def test_parse_capture_context_ignores_null_island_and_zero_dates():
     )
 
     assert ctx == CaptureContext(None, None, None)
+
+
+def test_subject_hint_goes_into_the_prompt():
+    prompt = make_prompt(subject_hint="Rufous hornero nest")
+
+    assert 'the subject is "Rufous hornero nest"' in prompt
+    assert "PHOTOGRAPHER'S NOTE" not in make_prompt()

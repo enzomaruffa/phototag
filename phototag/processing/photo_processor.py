@@ -19,7 +19,12 @@ from ..storage.tag_review import TagReviewStorage
 from ..storage.exif import EXIFHandler
 from ..storage.state_db import ProcessingStateDB, PhotoStatus
 from ..models.ai import AIAnalysisResponse, keywords_to_write
-from ..stack_ops import MemberContext, member_context
+from ..stack_ops import (
+    MemberContext,
+    member_context,
+    member_description,
+    member_keywords,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,9 +155,22 @@ def resolve_and_write_capture_date(
         return {}
 
 
-def stack_tags(stack: Optional[MemberContext]) -> List[str]:
-    """Keywords a stack member gets on top of its own (kind + stack id)."""
-    return stack.manifest.tags if stack else []
+def exif_fields(
+    analysis: AIAnalysisResponse,
+    approved_tags: List[str],
+    stack: Optional[MemberContext],
+) -> Dict[str, Any]:
+    """add_exif_metadata() arguments, with a stack member's annotations folded in."""
+    annotations = stack.manifest.annotations if stack else None
+    return {
+        "rating": analysis.rating,
+        "tags": keywords_to_write(analysis, approved_tags, member_keywords(stack)),
+        "description": member_description(analysis.description, stack),
+        # A member's UserComment carries its frame position and the plan
+        "notes": stack.user_comment if stack else analysis.notes,
+        "title": annotations.title if annotations else None,
+        "lens": annotations.lens if annotations else None,
+    }
 
 
 def reused_stack_analysis(
@@ -231,7 +249,12 @@ def process_single_photo(
                 asyncio.set_event_loop(loop)
                 try:
                     analysis = loop.run_until_complete(
-                        ai_service.analyze_photo(photo_path, existing_tags, capture_ctx)
+                        ai_service.analyze_photo(
+                            photo_path,
+                            existing_tags,
+                            capture_ctx,
+                            stack.manifest.annotations.subject if stack else None,
+                        )
                     )
                 finally:
                     loop.close()
@@ -286,16 +309,9 @@ def process_single_photo(
             ai_data = json.loads(current["ai_response_json"])
             analysis = AIAnalysisResponse(**ai_data)
 
-            tags_to_write = keywords_to_write(
-                analysis, tag_storage.get_approved_tag_names(), stack_tags(stack)
-            )
-
             success = exif_handler.add_exif_metadata(
                 photo_path,
-                analysis.rating,
-                tags_to_write,
-                analysis.description,
-                analysis.notes,
+                **exif_fields(analysis, tag_storage.get_approved_tag_names(), stack),
             )
 
             if not success:
@@ -667,14 +683,11 @@ class PhotoProcessor:
                 exif_handler = EXIFHandler()
                 success = exif_handler.add_exif_metadata(
                     photo_path,
-                    analysis.rating,
-                    keywords_to_write(
+                    **exif_fields(
                         analysis,
                         TagReviewStorage().get_approved_tag_names(),
-                        stack_tags(member_context(state_db, filepath)),
+                        member_context(state_db, filepath),
                     ),
-                    analysis.description,
-                    analysis.notes,
                 )
 
                 if success:

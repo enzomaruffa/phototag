@@ -22,6 +22,7 @@ class FakeAI(OpenAIService):
 
     def __init__(self, fail: bool = False):
         self.calls: List[str] = []
+        self.subject_hints: List[Optional[str]] = []
         self.fail = fail
 
     async def analyze_photo(
@@ -29,8 +30,10 @@ class FakeAI(OpenAIService):
         image_path: Path,
         existing_tags: Optional[List[str]] = None,
         capture_ctx: Optional[CaptureContext] = None,
+        subject_hint: Optional[str] = None,
     ) -> AIAnalysisResponse:
         self.calls.append(image_path.name)
+        self.subject_hints.append(subject_hint)
         if self.fail:
             raise RuntimeError("model down")
         return AIAnalysisResponse.model_validate(
@@ -47,7 +50,7 @@ class FakeAI(OpenAIService):
 
 
 class Pipeline:
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, annotations: Optional[dict] = None):
         self.db = ProcessingStateDB(storage_dir=tmp_path / ".phototag")
         self.tags = TagReviewStorage(storage_dir=tmp_path / ".phototag")
         self.tags.save_approved_tags([{"name": "macro"}])
@@ -59,7 +62,13 @@ class Pipeline:
         self.db.import_sequence(
             SEQUENCE_ID,
             "focus_stack",
-            json.dumps(manifest_dict(frames=3)),
+            json.dumps(
+                {
+                    **manifest_dict(frames=3),
+                    "plan": {"frames": 3, "direction": "in", "step": 16},
+                    "annotations": annotations or {},
+                }
+            ),
             "seq.json",
             "2026-10-31T14:03:22",
             3,
@@ -99,6 +108,17 @@ class Pipeline:
         ).stdout
         keywords = json.loads(out)[0].get("Keywords", [])
         return [keywords] if isinstance(keywords, str) else keywords
+
+    def read_exif(self, filepath: str, *names: str) -> dict:
+        row = self.db.get_photo_status(filepath)
+        assert row is not None
+        out = subprocess.run(
+            ["exiftool", "-j", *[f"-{n}" for n in names], row["moved_to_path"]],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        return json.loads(out)[0]
 
 
 def test_followers_reuse_the_representative_analysis(tmp_path):
@@ -157,3 +177,46 @@ def test_claim_defers_followers_until_the_second_wave(tmp_path):
 
     assert sorted(claimed) == sorted([pipeline.members[1], str(loose)])
     assert sorted(later) == sorted([pipeline.members[0], pipeline.members[2]])
+
+
+def test_annotations_are_written_into_every_member(tmp_path):
+    pipeline = Pipeline(
+        tmp_path,
+        annotations={
+            "title": "Hornero nest, macro",
+            "notes": "Window light from the left",
+            "subject": "Rufous hornero nest",
+            "tags": ["nature"],
+            "lens": "Laowa 100mm f/2.8",
+        },
+    )
+    first, representative, _ = pipeline.members
+    # A lens the camera reported wins over the typed one
+    subprocess.run(
+        [
+            "exiftool",
+            "-q",
+            "-overwrite_original",
+            "-LensModel=FE 90mm F2.8 Macro",
+            first,
+        ],
+        check=True,
+    )
+    ai = FakeAI()
+
+    pipeline.run(representative, ai)
+    pipeline.run(first, ai)
+
+    assert ai.subject_hints == ["Rufous hornero nest"]
+    rep = pipeline.read_exif(
+        representative, "XMP-dc:Title", "Description", "LensModel", "UserComment"
+    )
+    assert rep["Title"] == "Hornero nest, macro"
+    assert rep["Description"] == (
+        "A bird nest on a branch. Subject: Rufous hornero nest. "
+        "Window light from the left"
+    )
+    assert rep["LensModel"] == "Laowa 100mm f/2.8"
+    assert rep["UserComment"] == "focus_stack 2/3, in, step 16"
+    assert pipeline.read_exif(first, "LensModel")["LensModel"] == "FE 90mm F2.8 Macro"
+    assert "nature" in pipeline.keywords(first)

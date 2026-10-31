@@ -25,12 +25,20 @@ from .stacks import (
     pick_representative,
 )
 from .storage.exif import EXIFHandler
-from .storage.state_db import ProcessingStateDB
+from .storage.state_db import PhotoStatus, ProcessingStateDB
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MANIFEST_DIR = "~/Library/Mobile Documents/iCloud~dev~enzomaruffa~openalphalink/Documents/Sequences"
 DEFAULT_MAX_SKEW_S = 120.0
+
+# Member statuses whose files already carry their EXIF; annotations edited
+# later are not rewritten into them
+WRITTEN_STATUSES = {
+    PhotoStatus.EXIF_WRITTEN.value,
+    PhotoStatus.MOVING.value,
+    PhotoStatus.PROCESSED.value,
+}
 
 
 def manifest_dirs() -> List[Path]:
@@ -51,6 +59,10 @@ def max_clock_skew() -> float:
 class ImportSummary:
     imported: int = 0
     already_known: int = 0
+    updated: List[str] = field(default_factory=list)
+    # Annotations changed after some members were already written; those
+    # files keep the old annotations
+    edited_after_processing: List[str] = field(default_factory=list)
     matched: List[str] = field(default_factory=list)
     unmatched: List[str] = field(default_factory=list)
 
@@ -58,23 +70,44 @@ class ImportSummary:
 def import_manifests(
     state_db: ProcessingStateDB, directories: List[Path]
 ) -> ImportSummary:
-    """Store every manifest found; re-importing a known id is a no-op."""
+    """Store every manifest found.
+
+    Re-importing a known id only picks up edited annotations: the app
+    rewrites a manifest when the user edits them, and the frames never change.
+    """
     summary = ImportSummary()
     for path in find_manifest_files(directories):
         manifest = load_manifest(path)
         if manifest is None:
             continue  # some other JSON file
+        text = path.read_text()
         if state_db.import_sequence(
             manifest.id,
             manifest.kind,
-            path.read_text(),
+            text,
             str(path),
             manifest.started_at.isoformat(),
             len(manifest.frames),
         ):
             summary.imported += 1
-        else:
-            summary.already_known += 1
+            continue
+
+        summary.already_known += 1
+        stored = state_db.get_sequence(manifest.id)
+        if stored is None:
+            continue
+        current = json.loads(stored["manifest_json"])
+        incoming = json.loads(text).get("annotations")
+        if current.get("annotations") == incoming:
+            continue
+        current["annotations"] = incoming
+        state_db.update_sequence_manifest(manifest.id, json.dumps(current), str(path))
+        summary.updated.append(manifest.id)
+        if any(
+            m["status"] in WRITTEN_STATUSES
+            for m in state_db.get_stack_members(manifest.id)
+        ):
+            summary.edited_after_processing.append(manifest.id)
     return summary
 
 
@@ -170,8 +203,15 @@ class MemberContext:
     manifest: Manifest
     frame_index: int
     position: int
+    exposures: int
     is_representative: bool
     representative_analysis: Optional[str]  # saved ai_response_json
+
+    @property
+    def user_comment(self) -> str:
+        return self.manifest.user_comment(
+            self.frame_index, self.position, self.exposures
+        )
 
 
 def member_context(
@@ -187,6 +227,27 @@ def member_context(
         manifest=manifest,
         frame_index=row["frame_index"],
         position=row["position"],
+        exposures=row["exposures"] or 1,
         is_representative=bool(row["is_representative"]),
         representative_analysis=row["representative_ai_response_json"],
     )
+
+
+def member_keywords(stack: Optional[MemberContext]) -> List[str]:
+    """Keywords a stack member gets on top of its own analysis."""
+    if not stack:
+        return []
+    return stack.manifest.tags + list(stack.manifest.annotations.tags)
+
+
+def member_description(description: str, stack: Optional[MemberContext]) -> str:
+    """AI description with the user's subject kept and their notes appended."""
+    if not stack:
+        return description
+    notes = stack.manifest.annotations
+    parts = [description.strip()]
+    if notes.subject and notes.subject.lower() not in description.lower():
+        parts.append(f"Subject: {notes.subject}.")
+    if notes.notes:
+        parts.append(notes.notes)
+    return " ".join(p for p in parts if p)

@@ -124,9 +124,17 @@ class OpenAIService(AIService):
         existing_tags: Optional[List[str]] = None,
         source_ctx: str = "",
         capture_ctx: Optional[CaptureContext] = None,
+        subject_hint: Optional[str] = None,
     ) -> str:
         """Prompt with source class, capture context and the tag vocabulary."""
         sections = [source_ctx + capture_context_line(capture_ctx)]
+        if subject_hint:
+            sections.append(
+                f'PHOTOGRAPHER\'S NOTE: the subject is "{subject_hint}". These are '
+                "the photographer's own words: use them to name the subject and keep "
+                "them in the description, but do not invent details they do not "
+                "support.\n"
+            )
 
         if existing_tags:
             categories = self._categorize_tags(existing_tags)
@@ -182,6 +190,7 @@ Other: {", ".join(categories.get("other", []))}
         image_path: Path,
         existing_tags: Optional[List[str]] = None,
         capture_ctx: Optional[CaptureContext] = None,
+        subject_hint: Optional[str] = None,
     ) -> AIAnalysisResponse:
         """Analyze photo using OpenAI Vision API."""
         max_retries = 3
@@ -195,7 +204,9 @@ Other: {", ".join(categories.get("other", []))}
             try:
                 image_b64, orig_w, orig_h = self._encode_image(image_path)
                 source_ctx = source_context(orig_w, orig_h, image_path.stat().st_size)
-                prompt = self._create_prompt(existing_tags, source_ctx, capture_ctx)
+                prompt = self._create_prompt(
+                    existing_tags, source_ctx, capture_ctx, subject_hint
+                )
 
                 response = await self.client.chat.completions.create(
                     model=self.model,
