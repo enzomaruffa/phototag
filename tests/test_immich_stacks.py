@@ -196,3 +196,56 @@ def test_record_new_location_follows_the_upload_move(tmp_path):
 
     row = db.get_photo_status("inbox/a.JPG")
     assert row is not None and row["moved_to_path"] == "outbox/a.JPG"
+
+
+def add_merged(db: ProcessingStateDB, status: str) -> None:
+    path = "inbox/merged.jpg"
+    db.add_photo(path, None)
+    db.update_photo_status(
+        path, PhotoStatus(status), {"processed_hashes": ("sha256-m", "sha1-m")}
+    )
+    db.set_sequence_merged(SEQUENCE_ID, "merged/merged.jpg", path)
+
+
+def test_merged_image_becomes_the_stack_primary(tmp_path, monkeypatch, uploader):
+    db = setup_db(tmp_path, ["processed"] * 3)
+    add_merged(db, "processed")
+    server = FakeImmich({"sha1-0": "a0", "sha1-1": "a1", "sha1-2": "a2", "sha1-m": "m"})
+    monkeypatch.setattr(immich, "requests", server)
+
+    assert link_immich_stacks(db, uploader, "key").stacked == 1
+    assert ("POST", "/stacks", {"assetIds": ["m", "a1", "a0", "a2"]}) in server.calls
+
+    server.calls.clear()
+    assert link_immich_stacks(db, uploader, "key").stacked == 0
+    assert server.calls == []
+
+
+def test_stack_waits_for_a_merged_image_still_in_the_pipeline(
+    tmp_path, monkeypatch, uploader
+):
+    db = setup_db(tmp_path, ["processed"] * 3)
+    add_merged(db, "pending")
+    server = FakeImmich({"sha1-0": "a0", "sha1-1": "a1", "sha1-2": "a2"})
+    monkeypatch.setattr(immich, "requests", server)
+
+    assert link_immich_stacks(db, uploader, "key").waiting == 1
+    assert server.calls == []
+
+
+def test_merged_image_uploaded_later_takes_over_the_stack(
+    tmp_path, monkeypatch, uploader
+):
+    db = setup_db(tmp_path, ["processed"] * 3, album="Macro 2026")
+    server = FakeImmich({"sha1-0": "a0", "sha1-1": "a1", "sha1-2": "a2", "sha1-m": "m"})
+    server.albums.append({"id": "album-9", "albumName": "Macro 2026"})
+    monkeypatch.setattr(immich, "requests", server)
+    link_immich_stacks(db, uploader, "key")
+    server.calls.clear()
+
+    add_merged(db, "processed")
+    summary = link_immich_stacks(db, uploader, "key")
+
+    assert summary.stacked == 1 and summary.albums == 1
+    assert ("POST", "/stacks", {"assetIds": ["m", "a1", "a0", "a2"]}) in server.calls
+    assert db.get_sequences()[0]["immich_stack_primary"] == "sha1-m"

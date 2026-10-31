@@ -196,6 +196,19 @@ class ProcessingStateDB:
                 conn.execute("ALTER TABLE sequences ADD COLUMN immich_stack_id TEXT")
             if "immich_album" not in sequence_columns:
                 conn.execute("ALTER TABLE sequences ADD COLUMN immich_album TEXT")
+            # SHA-1 of the stack's primary asset, so a merged image uploaded
+            # after the stack was made can still become its cover
+            if "immich_stack_primary" not in sequence_columns:
+                conn.execute(
+                    "ALTER TABLE sequences ADD COLUMN immich_stack_primary TEXT"
+                )
+            # The merged focus stack (stacks merge): the JPEG it wrote, and the
+            # inbox path of the copy it dropped into the pipeline, which is
+            # that photo's photos.filepath
+            if "merged_path" not in sequence_columns:
+                conn.execute("ALTER TABLE sequences ADD COLUMN merged_path TEXT")
+            if "merged_inbox_path" not in sequence_columns:
+                conn.execute("ALTER TABLE sequences ADD COLUMN merged_inbox_path TEXT")
 
             # Indexes for performance
             conn.execute(
@@ -371,8 +384,8 @@ class ProcessingStateDB:
         """Atomically claim the next pending photo for processing.
 
         With defer_stack_followers, stack members other than the
-        representative are left for a later pass, so they can reuse its
-        analysis instead of being sent to the AI.
+        representative, and merged stack images, are left for a later pass,
+        so they can reuse its analysis instead of being sent to the AI.
         """
         with self.transaction() as conn:
             # Build list of statuses to claim from
@@ -400,6 +413,8 @@ class ProcessingStateDB:
                     follower_filter=(
                         "AND filepath NOT IN (SELECT filepath FROM stack_members"
                         " WHERE is_representative = 0)"
+                        " AND filepath NOT IN (SELECT merged_inbox_path"
+                        " FROM sequences WHERE merged_inbox_path IS NOT NULL)"
                         if defer_stack_followers
                         else ""
                     ),
@@ -993,18 +1008,60 @@ class ProcessingStateDB:
         sequence_id: str,
         stack_id: Optional[str] = None,
         album: Optional[str] = None,
+        primary_sha1: Optional[str] = None,
     ) -> None:
         with self.transaction() as conn:
             if stack_id:
                 conn.execute(
-                    "UPDATE sequences SET immich_stack_id = ? WHERE id = ?",
-                    (stack_id, sequence_id),
+                    "UPDATE sequences SET immich_stack_id = ?, immich_stack_primary = ?"
+                    " WHERE id = ?",
+                    (stack_id, primary_sha1, sequence_id),
                 )
             if album:
                 conn.execute(
                     "UPDATE sequences SET immich_album = ? WHERE id = ?",
                     (album, sequence_id),
                 )
+
+    def set_sequence_merged(
+        self, sequence_id: str, merged_path: str, inbox_path: Optional[str] = None
+    ) -> None:
+        """Record a merge; an earlier inbox copy is kept unless a new one replaces it."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE sequences SET merged_path = ?,"
+                " merged_inbox_path = COALESCE(?, merged_inbox_path) WHERE id = ?",
+                (merged_path, inbox_path, sequence_id),
+            )
+
+    def get_merged_inbox_paths(self) -> set:
+        """Inbox filepaths of merged stack images."""
+        conn = self._get_connection()
+        return {
+            row["merged_inbox_path"]
+            for row in conn.execute(
+                "SELECT merged_inbox_path FROM sequences"
+                " WHERE merged_inbox_path IS NOT NULL"
+            )
+        }
+
+    def get_merged_sequence(self, filepath: str) -> Optional[Dict]:
+        """The sequence whose merged image this is, plus its representative's analysis."""
+        conn = self._get_connection()
+        row = conn.execute(
+            """
+            SELECT s.id, s.manifest_json, rp.ai_response_json
+                   AS representative_ai_response_json
+            FROM sequences s
+            LEFT JOIN stack_members r
+              ON r.sequence_id = s.id AND r.is_representative = 1
+            LEFT JOIN photos rp ON rp.filepath = r.filepath
+            WHERE s.merged_inbox_path = ?
+            LIMIT 1
+        """,
+            (filepath,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def record_new_location(self, old_path: str, new_path: str) -> None:
         """A processed file moved again (upload -> outbox); keep moved_to_path true."""

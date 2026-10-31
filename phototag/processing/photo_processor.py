@@ -24,6 +24,7 @@ from ..stack_ops import (
     member_context,
     member_description,
     member_keywords,
+    merged_image_analysis,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,12 +176,18 @@ def exif_fields(
 
 def reused_stack_analysis(
     stack: Optional[MemberContext],
+    merged_from: Optional[str] = None,
 ) -> Optional[AIAnalysisResponse]:
-    """The representative's analysis, for a stack member that isn't it."""
-    if not stack or stack.is_representative or not stack.representative_analysis:
+    """The representative's analysis, for a stack member that isn't it or
+    for a merged stack image (merged_from: the representative's saved JSON)."""
+    if stack and not stack.is_representative:
+        saved = stack.representative_analysis
+    else:
+        saved = merged_from
+    if not saved:
         return None
     try:
-        return AIAnalysisResponse.model_validate_json(stack.representative_analysis)
+        return AIAnalysisResponse.model_validate_json(saved)
     except ValueError:
         return None
 
@@ -235,7 +242,9 @@ def process_single_photo(
             # Need to do AI analysis
             state_db.update_photo_status(filepath, PhotoStatus.AI_ANALYZING)
 
-            reused = reused_stack_analysis(stack)
+            reused = reused_stack_analysis(
+                stack, None if stack else merged_image_analysis(state_db, filepath)
+            )
             if reused is not None:
                 # Same scene as the stack's representative: reuse its analysis
                 # instead of paying for a near-identical one

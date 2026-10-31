@@ -33,6 +33,7 @@ make upload           # upload processed/ to Immich, move to outbox/
 | `make receive` | Accept sequence manifests pushed by Open Alpha Link over the local network, and print the pairing QR code |
 | `make stacks` | Import sequence manifests, match their frames to inbox photos, list them |
 | `make stacks-export` | Copy each stack into its own folder for focus-stacking software (`OUT=dir`, `KIND=` optional) |
+| `make stacks-merge` | Merge each focus stack into one image that is sharp front to back (`OUT=dir`, `ID=`, `INBOX=1` to tag and upload it, `FORCE=1`) |
 | `make import` | Pick a mounted SD card and copy its new photos/videos into the inbox |
 | `make process` | Analyze inbox photos with AI (`WORKERS=4` to override) |
 | `make watch` | Watch the inbox and auto-process new files as they arrive |
@@ -112,6 +113,8 @@ Names go into the description and become snake_case keywords (`mona_lisa`, `eiff
 **Immich.** After `upload`, each sequence whose members are all on the server becomes an Immich stack with the representative as its cover. Assets are found by checksum. If the manifest names an album, the assets are added to it, unless `--album`/`ALBUM=` was given. A failure here only prints a warning.
 
 **Export.** `make stacks-export OUT=~/Stacks` (`phototag stacks export --out DIR [--kind focus_stack] [--raw/--jpeg] [--force]`) copies each stack into `DIR/<yyyy-mm-dd_HHMMSS>_<kind>_<id>/` with frame-ordered names (`001_DSC01234.ARW`) for Helicon Focus, Zerene or similar. Originals stay where they are. Folders that already exist are skipped unless `--force`.
+
+**Merge.** `make stacks-merge` (`phototag stacks merge [--id ID] [--out DIR] [--to-inbox] [--force]`) merges each focus stack into one image, using the RAW of every exposure when there is one. Frames are aligned to the middle frame, which corrects the magnification change from focus breathing, and fused so each area comes from the frame where it is sharpest. It writes `<yyyy-mm-dd_HHMMSS>_focus_stack_<id>_merged.tif` (16-bit) and `.jpg` to `./merged/` by default, plus a `_depth.png` that shows which frame each area came from. The border that alignment leaves is cropped away. The outputs carry the middle frame's metadata, the keywords `focus_stack_merged` and `stack_<id>`, the annotations, and `UserComment` like `focus_stack merged from 10 frames, out, step 127`. Already merged stacks are skipped unless `--force`. With `--to-inbox` the JPEG is also copied into the inbox, so the next `process` and `upload` treat it as a new photo: it reuses the representative's analysis instead of a new AI call, and once it's on the server it becomes the cover of the Immich stack, even when the stack was made earlier. Peak memory is about 2.5 GB for 24 MP frames whatever the frame count, since frames are decoded one at a time.
 
 `phototag stacks list` shows every sequence with its frames matched, photos, offset and status.
 

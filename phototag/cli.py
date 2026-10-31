@@ -48,6 +48,7 @@ from phototag.stack_ops import (
     manifest_dirs,
     match_inbox,
     max_clock_skew,
+    merge_stacks,
 )
 from phototag import receiver
 from phototag.storage.tag_review import TagReviewStorage
@@ -1258,6 +1259,67 @@ def stacks_export(
             f"⚠️  {len(summary.missing)} frames are no longer on disk and were skipped",
             style="yellow",
         )
+
+
+@stacks_app.command("merge")
+def stacks_merge(
+    sequence_id: Optional[str] = typer.Option(
+        None, "--id", help="Only this sequence (full id or its first 8 characters)"
+    ),
+    kind: str = typer.Option("focus_stack", "--kind", "-k", help="Kind to merge"),
+    out: Path = typer.Option(
+        Path("./merged"), "--out", "-o", help="Folder for the merged images"
+    ),
+    to_inbox: bool = typer.Option(
+        False,
+        "--to-inbox",
+        help="Also copy the merged JPEG into the inbox, to tag and upload it",
+    ),
+    force: bool = typer.Option(False, "--force", help="Merge already merged stacks"),
+):
+    """Merge each focus stack into one image that is sharp front to back."""
+    search_dirs = [
+        Path(os.getenv("OUTBOX_DIR", "./outbox")),
+        Path(os.getenv("PROCESSED_DIR", "./processed")),
+    ]
+    inbox_dir = Path(os.getenv("INBOX_DIR", "./inbox")) if to_inbox else None
+    try:
+        summary = merge_stacks(
+            ProcessingStateDB(),
+            out,
+            search_dirs,
+            inbox_dir=inbox_dir,
+            sequence_id=sequence_id,
+            kind=kind,
+            force=force,
+            progress=lambda step: console.print(f"   {step}", style="dim"),
+        )
+    except ValueError as e:
+        console.print(f"❌ {e}", style="red")
+        raise typer.Exit(1)
+    for stack in summary.merged:
+        weak = [a.path.name for a in stack.alignments if a.method in ("orb", "none")]
+        console.print(f"🔍 {stack.jpeg} ({stack.frames} frames)")
+        if weak:
+            console.print(
+                f"⚠️  Alignment fell back for {', '.join(weak)} - check the result",
+                style="yellow",
+            )
+        if stack.inbox_copy:
+            console.print(f"📥 Copied to {stack.inbox_copy}")
+    console.print(
+        f"✅ Merged {len(summary.merged)} stacks"
+        f" ({summary.skipped} already merged - use --force to redo them)"
+    )
+    if summary.missing:
+        console.print(
+            f"⚠️  {len(summary.missing)} frames are no longer on disk and were skipped",
+            style="yellow",
+        )
+    for failure in summary.failed:
+        console.print(f"❌ {failure}", style="red")
+    if summary.failed:
+        raise typer.Exit(1)
 
 
 @app.command()

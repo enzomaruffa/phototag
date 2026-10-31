@@ -9,12 +9,16 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
-from .media import RAW_EXTENSIONS, find_media_files
+from . import focus_merge
+from .media import RAW_EXTENSIONS, find_media_files, unique_destination
 from .stacks import (
     JPEG_SUFFIXES,
+    KIND_TAGS,
+    Annotations,
     Manifest,
     Shot,
     find_manifest_files,
@@ -153,7 +157,8 @@ def match_inbox(
     if not pending:
         return summary
 
-    taken = state_db.get_stack_member_paths()
+    # Merged stack images carry their middle frame's capture time and camera
+    taken = state_db.get_stack_member_paths() | state_db.get_merged_inbox_paths()
     photos = [
         p
         for p in find_media_files(inbox_dir, include_videos=False)
@@ -238,6 +243,12 @@ def member_context(
     )
 
 
+def merged_image_analysis(state_db: ProcessingStateDB, filepath: str) -> Optional[str]:
+    """For a merged stack image in the inbox, its representative's saved analysis."""
+    row = state_db.get_merged_sequence(filepath)
+    return row["representative_ai_response_json"] if row else None
+
+
 def member_keywords(stack: Optional[MemberContext]) -> List[str]:
     """Keywords a stack member gets on top of its own analysis."""
     if not stack:
@@ -249,7 +260,10 @@ def member_description(description: str, stack: Optional[MemberContext]) -> str:
     """AI description with the user's subject kept and their notes appended."""
     if not stack:
         return description
-    notes = stack.manifest.annotations
+    return annotated_description(description, stack.manifest.annotations)
+
+
+def annotated_description(description: str, notes: Annotations) -> str:
     parts = [description.strip()]
     if notes.subject and notes.subject.lower() not in description.lower():
         parts.append(f"Subject: {notes.subject}.")
@@ -299,17 +313,36 @@ def link_immich_stacks(
         album = None if album_override else manifest.annotations.album
         needs_stack = not sequence["immich_stack_id"]
         needs_album = bool(album) and sequence["immich_album"] != album
-        if not (needs_stack or needs_album):
-            continue
 
         members = state_db.get_stack_members(sequence["id"])
-        if any(m["status"] in IN_FLIGHT_STATUSES for m in members):
+        merged = (
+            state_db.get_photo_status(sequence["merged_inbox_path"])
+            if sequence["merged_inbox_path"]
+            else None
+        )
+        if any(m["status"] in IN_FLIGHT_STATUSES for m in members) or (
+            merged and merged["status"] in IN_FLIGHT_STATUSES
+        ):
             summary.waiting += 1
             continue
         # Failed or duplicate members have no asset of their own
         uploaded = [m for m in members if m["status"] == PhotoStatus.PROCESSED.value]
         uploaded.sort(key=lambda m: (not m["is_representative"], m["position"]))
         checksums = [m["processed_sha1"] for m in uploaded if m["processed_sha1"]]
+        # The merged image is the cover; a stack made before it was uploaded
+        # is made again with it first (Immich merges the two stacks)
+        merged_sha1 = (
+            merged["processed_sha1"]
+            if merged and merged["status"] == PhotoStatus.PROCESSED.value
+            else None
+        )
+        if merged_sha1:
+            checksums.insert(0, merged_sha1)
+            if sequence["immich_stack_primary"] != merged_sha1:
+                needs_stack = True
+                needs_album = bool(album)
+        if not (needs_stack or needs_album):
+            continue
         try:
             ids = uploader.asset_ids_by_checksum(api_key, checksums)
             if not checksums or any(c not in ids for c in checksums):
@@ -318,7 +351,9 @@ def link_immich_stacks(
             asset_ids = [ids[c] for c in checksums]
             if needs_stack and len(asset_ids) > 1:
                 stack_id = uploader.create_stack(api_key, asset_ids)
-                state_db.set_sequence_immich(sequence["id"], stack_id=stack_id)
+                state_db.set_sequence_immich(
+                    sequence["id"], stack_id=stack_id, primary_sha1=checksums[0]
+                )
                 summary.stacked += 1
             if needs_album and album:
                 uploader.add_to_album(api_key, album, asset_ids)
@@ -400,4 +435,188 @@ def export_stacks(
             shutil.rmtree(dest)
         partial.rename(dest)
         summary.exported.append(dest)
+    return summary
+
+
+MERGEABLE_KINDS = {"focus_stack"}
+
+
+@dataclass
+class MergedStack:
+    sequence_id: str
+    frames: int
+    jpeg: Path
+    tiff: Path
+    depth: Path
+    alignments: List[focus_merge.FrameAlignment]
+    inbox_copy: Optional[Path] = None
+
+
+@dataclass
+class MergeSummary:
+    merged: List[MergedStack] = field(default_factory=list)
+    skipped: int = 0
+    missing: List[str] = field(default_factory=list)
+    failed: List[str] = field(default_factory=list)
+
+
+def merge_frames(
+    state_db: ProcessingStateDB, sequence_id: str, search_dirs: List[Path]
+) -> Tuple[List[Path], Optional[Path], List[str]]:
+    """One file per exposure in frame order (RAW over JPEG), the
+    representative's file, and the members no longer on disk."""
+    members = state_db.get_stack_members(sequence_id)
+    by_path = {m["filepath"]: m for m in members}
+    frames: List[Path] = []
+    representative: Optional[Path] = None
+    missing: List[str] = []
+    for group in group_pairs([m["filepath"] for m in members]):
+        raws = [p for p in group if Path(p).suffix.lower() in RAW_EXTENSIONS]
+        chosen = None
+        for path in raws + [p for p in group if p not in raws]:
+            chosen = member_location(by_path[path], search_dirs)
+            if chosen is not None:
+                break
+        if chosen is None:
+            missing.extend(group)
+            continue
+        frames.append(chosen)
+        for path in group:
+            if by_path[path]["is_representative"]:
+                representative = member_location(by_path[path], search_dirs) or chosen
+    return frames, representative, missing
+
+
+def merged_name(manifest: Manifest) -> str:
+    return f"{export_folder_name(manifest)}_merged"
+
+
+def merged_user_comment(manifest: Manifest, frames: int) -> str:
+    plan = manifest.plan_summary()
+    return f"{manifest.kind} merged from {frames} frames" + (
+        f", {plan}" if plan else ""
+    )
+
+
+def merged_keywords(manifest: Manifest) -> List[str]:
+    kind = KIND_TAGS.get(manifest.kind, manifest.kind)
+    return [f"{kind}_merged", f"stack_{manifest.short_id}"] + list(
+        manifest.annotations.tags
+    )
+
+
+def tag_merged_image(
+    exif: EXIFHandler, source: Path, target: Path, manifest: Manifest, frames: int
+) -> None:
+    """Metadata of the middle frame, plus the stack's keywords and annotations."""
+    notes = manifest.annotations
+    if not exif.copy_metadata_to_derived(
+        source, target, merged_user_comment(manifest, frames)
+    ):
+        raise RuntimeError(f"could not copy metadata into {target.name}")
+    if not exif.add_exif_metadata(
+        target,
+        rating=0,
+        tags=merged_keywords(manifest),
+        description=annotated_description("", notes),
+        title=notes.title,
+        lens=notes.lens,
+    ):
+        raise RuntimeError(f"could not write keywords into {target.name}")
+
+
+def _inbox_destination(
+    state_db: ProcessingStateDB, inbox_dir: Path, jpeg: Path
+) -> Path:
+    """A free inbox path, also unused as a photos key (an earlier merge's copy
+    that already moved on keeps its record under that path)."""
+    dest = unique_destination(inbox_dir, jpeg)
+    if state_db.get_photo_status(str(dest)) is not None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = inbox_dir / f"{jpeg.stem}_{stamp}{jpeg.suffix}"
+    return dest
+
+
+def merge_stacks(
+    state_db: ProcessingStateDB,
+    out_dir: Path,
+    search_dirs: List[Path],
+    inbox_dir: Optional[Path] = None,
+    sequence_id: Optional[str] = None,
+    kind: str = "focus_stack",
+    force: bool = False,
+    exif: Optional[EXIFHandler] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> MergeSummary:
+    """Merge each matched focus stack into one sharp image in out_dir.
+
+    sequence_id matches the full id or its first 8 characters. A stack
+    already merged (its JPEG still on disk) is skipped unless force is set.
+    With inbox_dir, the merged JPEG is also copied there so the normal
+    pipeline analyzes, tags and uploads it. Source frames are only read.
+    """
+    if kind not in MERGEABLE_KINDS:
+        raise ValueError(f"only {', '.join(sorted(MERGEABLE_KINDS))} can be merged")
+    say = progress or (lambda _: None)
+    summary = MergeSummary()
+    wanted = sequence_id.lower() if sequence_id else None
+    for sequence in state_db.get_sequences(status="matched"):
+        manifest = parse_manifest(json.loads(sequence["manifest_json"]))
+        if manifest is None or manifest.kind != kind:
+            continue
+        if wanted and wanted not in (manifest.id.lower(), manifest.short_id):
+            continue
+        merged_path = sequence["merged_path"]
+        if merged_path and Path(merged_path).is_file() and not force:
+            summary.skipped += 1
+            continue
+
+        frames, representative, missing = merge_frames(
+            state_db, manifest.id, search_dirs
+        )
+        summary.missing.extend(missing)
+        if len(frames) < 2 or representative is None:
+            summary.failed.append(f"{manifest.short_id}: fewer than two frames")
+            continue
+        middle = next(
+            (i for i, f in enumerate(frames) if f.stem == representative.stem),
+            (len(frames) - 1) // 2,
+        )
+        try:
+            say(f"{manifest.short_id}: merging {len(frames)} frames")
+            result = focus_merge.merge(
+                frames, middle, lambda step: say(f"{manifest.short_id}: {step}")
+            )
+            tiff, jpeg, depth = focus_merge.write_outputs(
+                result, out_dir / merged_name(manifest), len(frames)
+            )
+            alignments = result.alignments
+            del result
+            for target in (tiff, jpeg):
+                tag_merged_image(
+                    exif or EXIFHandler(), representative, target, manifest, len(frames)
+                )
+        except Exception as e:
+            summary.failed.append(f"{manifest.short_id}: {e}")
+            continue
+
+        inbox_copy = None
+        if inbox_dir is not None:
+            inbox_dir.mkdir(parents=True, exist_ok=True)
+            inbox_copy = _inbox_destination(state_db, inbox_dir, jpeg)
+            shutil.copy2(jpeg, inbox_copy)
+        state_db.set_sequence_merged(
+            manifest.id, str(jpeg), str(inbox_copy) if inbox_copy else None
+        )
+        summary.merged.append(
+            MergedStack(
+                manifest.id,
+                len(frames),
+                jpeg,
+                tiff,
+                depth,
+                alignments,
+                inbox_copy=inbox_copy,
+            )
+        )
     return summary

@@ -17,6 +17,8 @@ dependencies = [
     "uvicorn>=0.54.0",
     "zeroconf>=0.152.0",
     "qrcode>=8.2",
+    "opencv-python-headless>=5.0.0.93",
+    "numpy>=2.2.6",
 ]
 
 [project.scripts]

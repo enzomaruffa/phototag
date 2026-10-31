@@ -220,3 +220,24 @@ def test_annotations_are_written_into_every_member(tmp_path):
     assert rep["UserComment"] == "focus_stack 2/3, in, step 16"
     assert pipeline.read_exif(first, "LensModel")["LensModel"] == "FE 90mm F2.8 Macro"
     assert "nature" in pipeline.keywords(first)
+
+
+def test_merged_image_reuses_the_analysis_and_waits_for_it(tmp_path):
+    pipeline = Pipeline(tmp_path)
+    merged = pipeline.photo("2026-10-31_140322_focus_stack_3f9a1c2e_merged.jpg")
+    pipeline.db.set_sequence_merged(SEQUENCE_ID, "merged/out.jpg", str(merged))
+
+    claimed = []
+    while path := pipeline.db.claim_next_photo("w", defer_stack_followers=True):
+        claimed.append(path)
+    assert claimed == [pipeline.members[1]]
+    for path in pipeline.members + [str(merged)]:
+        pipeline.db.update_photo_status(path, PhotoStatus.PENDING)
+
+    ai = FakeAI()
+    pipeline.run(pipeline.members[1], ai)
+    assert pipeline.run(str(merged), ai) == PhotoStatus.PROCESSED
+
+    assert ai.calls == ["DSC00001.JPG"]
+    # Not a frame: no frame position or kind keyword of its own
+    assert pipeline.keywords(str(merged)) == ["macro", "rufous_hornero"]

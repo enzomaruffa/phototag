@@ -351,6 +351,34 @@ class EXIFHandler:
             logging.error(f"Failed to remove zero rating from {photo_path}: {e}")
             return False
 
+    def copy_metadata_to_derived(
+        self, source_path: Path, dest_path: Path, user_comment: str
+    ) -> bool:
+        """Give an image rendered from source (a merge) the source's metadata.
+
+        The pixels are already upright and new, so the orientation is reset
+        and the source's embedded thumbnail and preview are dropped.
+        """
+        cmd = [
+            self.exiftool_path,
+            "-q",
+            "-overwrite_original",
+            "-TagsFromFile",
+            str(source_path),
+            "-all:all",
+            "-n",
+            "-Orientation=1",
+            "-ThumbnailImage=",
+            "-PreviewImage=",
+            f"-UserComment={user_comment}",
+            str(dest_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logging.error(f"Failed to copy metadata to {dest_path}: {result.stderr}")
+            return False
+        return True
+
     def copy_metadata(self, source_path: Path, dest_path: Path) -> bool:
         """Copy all metadata from source to destination."""
         try:

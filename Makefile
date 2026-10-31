@@ -1,7 +1,7 @@
 WORKERS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help setup card import stacks stacks-export drive-export process watch retry review upload sync-hashes status failed doctor fmt lint typecheck test check
+.PHONY: help setup card import stacks stacks-export stacks-merge drive-export process watch retry review upload sync-hashes status failed doctor fmt lint typecheck test check
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -33,6 +33,9 @@ stacks: ## Import Open Alpha Link sequence manifests and match them to inbox pho
 stacks-export: ## Copy each stack into its own folder for focus-stacking software. OUT=dir KIND=focus_stack optional
 	$(if $(OUT),,$(error OUT=dir is required))
 	uv run phototag stacks export --out "$(OUT)" $(if $(KIND),--kind $(KIND))
+
+stacks-merge: ## Merge each focus stack into one sharp image. OUT=dir ID=sequence INBOX=1 (tag and upload it too) FORCE=1 optional
+	uv run phototag stacks merge $(if $(OUT),--out "$(OUT)") $(if $(ID),--id $(ID)) $(if $(INBOX),--to-inbox) $(if $(FORCE),--force)
 
 drive-export: ## Finished photos as JPEGs in one folder per rating. OUT=dir SINCE/UNTIL="YYYY-MM-DD[ HH:MM]"
 	uv run python scripts/drive_export.py $(if $(OUT),--out "$(OUT)") $(if $(SINCE),--since "$(SINCE)") $(if $(UNTIL),--until "$(UNTIL)")

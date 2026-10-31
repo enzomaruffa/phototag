@@ -190,6 +190,7 @@ cython_debug/
 inbox/
 processed/
 outbox/
+merged/
 
 .DS_Store
 
