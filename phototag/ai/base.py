@@ -5,6 +5,7 @@ from typing import List, Optional
 from pathlib import Path
 
 from ..models.ai import AIAnalysisResponse
+from ..storage.exif import CaptureContext
 
 
 class AIService(ABC):
@@ -12,7 +13,10 @@ class AIService(ABC):
 
     @abstractmethod
     async def analyze_photo(
-        self, image_path: Path, existing_tags: Optional[List[str]] = None
+        self,
+        image_path: Path,
+        existing_tags: Optional[List[str]] = None,
+        capture_ctx: Optional[CaptureContext] = None,
     ) -> AIAnalysisResponse:
         """Analyze a photo and return structured response."""
         pass

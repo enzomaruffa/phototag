@@ -16,6 +16,63 @@ from .base import AIService
 from ..dating import source_context
 from ..media import RAW_EXTENSIONS
 from ..models.ai import AIAnalysisResponse
+from ..storage.exif import CaptureContext
+
+
+BASE_PROMPT = """Analyze this photograph. Return a rating, a description, tags, any confidently named subjects, and any date printed in the frame.
+
+RATING (1-5 stars, from technical quality, composition and subject interest; be conservative):
+- 1: Trash - serious technical flaws, unusable
+- 2: OK - no clear defects but nothing special
+- 3: Worth looking twice - good enough to consider keeping
+- 4: Worth editing - clear potential, merits post-processing
+- 5: Absolute masterpiece - exceptional in every way
+
+DESCRIPTION: two to four factual sentences about what is in the frame, the setting and the light. Use the proper names from named_subjects when there are any ("The Mona Lisa behind glass at the Louvre", not "a painting of a woman").
+
+TAGS: lowercase snake_case vocabulary words for the subject, lighting, composition and quality. Tag generously - aim for at least one tag per category that applies; over-tagging beats under-tagging. Put a tag you took from AVAILABLE TAGS in existing_tags_used and only genuinely new concepts in new_tags_needed. Proper names never go in either list; they belong in named_subjects.
+
+NAMED SUBJECTS: name specific, recognizable things when you are confident: artworks ("Mona Lisa" by Leonardo da Vinci), landmarks ("Eiffel Tower"), notable buildings and places, species ("Rufous hornero", not just "bird"), products and vehicle models ("Porsche 911 (992)"), and well-known events. kind is one of: artwork, landmark, building, place, species, product, vehicle, event, public_figure, other.
+- Only include a subject at confidence 0.7 or higher. Never guess; when unsure, leave it out. An empty list is the normal answer.
+- Never identify private individuals. Name a person only when they are a widely known public figure AND the scene makes it unambiguous (a named stage, a caption, a jersey); otherwise describe them without a name.
+- CAPTURE CONTEXT, when given, can confirm a place or landmark but never replaces what is visible.
+
+DATE STAMP: if a date is printed or burned into the image (corner digits are common on film and toy cameras), return it as visible_date in YYYY-MM-DD form, converting whatever format is shown. Only report a date you can clearly read; otherwise null. Never infer it from the scene or the capture context.
+
+Return JSON only, no other text:
+{
+    "rating": 4,
+    "existing_tags_used": ["architecture", "golden_hour"],
+    "new_tags_needed": ["river"],
+    "description": "The Eiffel Tower seen from across the Seine at sunset. Warm side light picks out the iron lattice while tour boats pass in the foreground.",
+    "notes": "Classic composition; a slightly lower horizon would help",
+    "confidence": 0.85,
+    "visible_date": null,
+    "named_subjects": [{"name": "Eiffel Tower", "kind": "landmark", "confidence": 0.98}]
+}"""
+
+TAG_REUSE_RULES = """Reuse these whenever they fit, even imperfectly; create a new tag only when no existing tag covers the concept, not even partially. Check for synonyms first:
+- 'casual' exists -> don't create 'informal' or 'relaxed'
+- 'group' exists -> don't create 'multiple_people' or 'crowd'
+- 'blur' exists -> don't create 'blurry' or 'out_of_focus'
+- 'indoor' exists -> don't create 'inside' or 'interior'
+- 'celebration' exists -> don't create 'party' or 'festive'
+- 'portrait' exists -> don't create 'headshot' or 'face'
+"""
+
+
+def capture_context_line(ctx: Optional[CaptureContext]) -> str:
+    """Prompt line with the camera's GPS position and capture date, if known."""
+    if ctx is None:
+        return ""
+    parts = []
+    if ctx.latitude is not None and ctx.longitude is not None:
+        parts.append(f"near {ctx.latitude:.4f}, {ctx.longitude:.4f}")
+    if ctx.taken_on:
+        parts.append(f"on {ctx.taken_on}")
+    if not parts:
+        return ""
+    return f"CAPTURE CONTEXT (from the file's EXIF): Taken {' '.join(parts)}.\n"
 
 
 class OpenAIService(AIService):
@@ -66,66 +123,26 @@ class OpenAIService(AIService):
         self,
         existing_tags: Optional[List[str]] = None,
         source_ctx: str = "",
+        capture_ctx: Optional[CaptureContext] = None,
     ) -> str:
-        """Create contextual prompt with existing tags and source-class context."""
-        base_prompt = """Analyze this photograph and rate it 1-5 stars based on technical quality, composition, and subject interest.
-
-Guidelines (be conservative):
-- Rate 1: Trash - serious technical flaws, unusable
-- Rate 2: OK - no clear defects but nothing special
-- Rate 3: Worth looking twice - good enough to consider keeping
-- Rate 4: Worth editing - has clear potential, merits post-processing
-- Rate 5: Absolute masterpiece - exceptional in every way
-
-Provide a detailed description of what you see in the image.
-
-Be AGGRESSIVE with tagging - aim to include at least one tag per major category when appropriate (subject, lighting, composition, quality, etc.). Better to over-tag than under-tag.
-
-CRITICAL: Maximize use of existing_tags_used and minimize new_tags_needed. Always prefer reusing an existing tag (even if slightly imperfect) over creating a new one. Only create new tags for genuinely unique concepts not covered by any existing tag.
-
-DATE STAMP: If a date is printed/burned into the image itself (corner digits are common on film and toy cameras), return it as visible_date in YYYY-MM-DD form - convert whatever format is shown. Only report a date you can clearly read; otherwise return null. Do NOT infer dates from the scene content.
-
-Return JSON only, no other text:
-{
-    "rating": 4,
-    "existing_tags_used": ["portrait", "natural_light"],
-    "new_tags_needed": ["graduation"],
-    "description": "A young woman in a black graduation cap and gown stands smiling in front of a university building. She holds her diploma proudly while warm afternoon sunlight creates a natural rim light around her silhouette.",
-    "notes": "Well-composed graduation portrait with natural lighting",
-    "confidence": 0.85,
-    "visible_date": null
-}"""
+        """Prompt with source class, capture context and the tag vocabulary."""
+        sections = [source_ctx + capture_context_line(capture_ctx)]
 
         if existing_tags:
-            # Group tags for better context
             categories = self._categorize_tags(existing_tags)
-            context = f"""
-AVAILABLE TAGS (approved and pending - treat all as usable):
+            sections.append(
+                f"""AVAILABLE TAGS (approved and pending - all usable):
 Subjects: {", ".join(categories.get("subjects", []))}
 Lighting: {", ".join(categories.get("lighting", []))}
 Composition: {", ".join(categories.get("composition", []))}
 Quality: {", ".join(categories.get("quality", []))}
 Other: {", ".join(categories.get("other", []))}
 
-IMPORTANT TAGGING RULES:
-- These tags include both approved and pending tags - use any that apply
-- Be EXTREMELY aggressive with reusing existing tags - prefer existing over new
-- ALWAYS check for similar/related concepts before suggesting new tags
-- Only suggest new tags if NO existing tag covers the concept (even partially)
-- Better to use an imperfect existing tag than create a new one
-- Aim for comprehensive tagging covering subject, lighting, composition, and quality aspects
+{TAG_REUSE_RULES}"""
+            )
 
-EXAMPLES OF TAG REUSE (prefer existing):
-- If 'casual' exists, don't create 'informal' or 'relaxed'
-- If 'group' exists, don't create 'multiple_people' or 'crowd'
-- If 'blur' exists, don't create 'blurry' or 'out_of_focus'  
-- If 'indoor' exists, don't create 'inside' or 'interior'
-- If 'celebration' exists, don't create 'party' or 'festive'
-- If 'portrait' exists, don't create 'headshot' or 'face'
-"""
-            return source_ctx + context + base_prompt
-
-        return source_ctx + base_prompt
+        sections.append(BASE_PROMPT)
+        return "\n".join(s for s in sections if s)
 
     def _categorize_tags(self, tags: List[str]) -> dict:
         """Simple tag categorization for better prompting."""
@@ -161,7 +178,10 @@ EXAMPLES OF TAG REUSE (prefer existing):
         return categories
 
     async def analyze_photo(
-        self, image_path: Path, existing_tags: Optional[List[str]] = None
+        self,
+        image_path: Path,
+        existing_tags: Optional[List[str]] = None,
+        capture_ctx: Optional[CaptureContext] = None,
     ) -> AIAnalysisResponse:
         """Analyze photo using OpenAI Vision API."""
         max_retries = 3
@@ -175,7 +195,7 @@ EXAMPLES OF TAG REUSE (prefer existing):
             try:
                 image_b64, orig_w, orig_h = self._encode_image(image_path)
                 source_ctx = source_context(orig_w, orig_h, image_path.stat().st_size)
-                prompt = self._create_prompt(existing_tags, source_ctx)
+                prompt = self._create_prompt(existing_tags, source_ctx, capture_ctx)
 
                 response = await self.client.chat.completions.create(
                     model=self.model,

@@ -57,7 +57,7 @@ Set in `.env` (see `.env.example`):
 | Variable | Purpose |
 |---|---|
 | `OPENAI_API_KEY` | Required for photo analysis |
-| `OPENAI_MODEL` | Vision model (default `gpt-4o-mini`; set `gpt-5.6-luna` for max quality at ~1.7× the cost) |
+| `OPENAI_MODEL` | Vision model (default `gpt-6-luna`) |
 | `INBOX_DIR` / `PROCESSED_DIR` / `OUTBOX_DIR` | Pipeline directories (default `./inbox`, `./processed`, `./outbox`) |
 | `IMMICH_SSH_CONFIG_NAME` | SSH config entry for the Immich server tunnel. A comma list (`home-lan,home-remote`) uses the first one that answers |
 | `IMMICH_SERVER_HOST` + `IMMICH_SERVER_USER` | Alternative to the SSH config entry |
@@ -69,7 +69,7 @@ Set in `.env` (see `.env.example`):
 
 Each photo moves through tracked states in a SQLite database (`.phototag/processing_state.db`), so you can interrupt at any point (Ctrl+C) and resume with `phototag process`:
 
-1. **AI analysis** — the model rates the photo 1–5 stars, writes a description, and picks tags (strongly preferring your existing tag vocabulary). Responses use OpenAI's JSON mode, so they can't fail parsing, and are saved immediately — a photo is never analyzed (or billed) twice.
+1. **AI analysis** — the model rates the photo 1–5 stars, writes a description, picks tags (strongly preferring your existing tag vocabulary), and names recognizable subjects it is sure about. The prompt includes the GPS position and capture date from EXIF when the file has them. Responses use OpenAI's JSON mode, so they can't fail parsing, and are saved immediately — a photo is never analyzed (or billed) twice.
 2. **Tag review** — brand-new tags are queued for your approval; by default photos continue processing with only approved tags, and `phototag review-tags` backfills approved tags into EXIF afterwards.
 3. **EXIF write** — rating, description, keywords, and notes are embedded with exiftool (existing metadata is preserved, keywords are merged).
 4. **Move** — the file lands in `processed/`, ready for upload.

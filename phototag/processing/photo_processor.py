@@ -18,7 +18,7 @@ from ..media import file_hashes, is_video, pixel_hash, unique_destination
 from ..storage.tag_review import TagReviewStorage
 from ..storage.exif import EXIFHandler
 from ..storage.state_db import ProcessingStateDB, PhotoStatus
-from ..models.ai import AIAnalysisResponse
+from ..models.ai import AIAnalysisResponse, keywords_to_write
 
 logger = logging.getLogger(__name__)
 
@@ -195,13 +195,14 @@ def process_single_photo(
             state_db.update_photo_status(filepath, PhotoStatus.AI_ANALYZING)
 
             existing_tags = tag_storage.get_all_available_tags()
+            capture_ctx = exif_handler.read_capture_context(photo_path)
 
             # Run async function in sync context
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
                 analysis = loop.run_until_complete(
-                    ai_service.analyze_photo(photo_path, existing_tags)
+                    ai_service.analyze_photo(photo_path, existing_tags, capture_ctx)
                 )
             finally:
                 loop.close()
@@ -256,11 +257,9 @@ def process_single_photo(
             ai_data = json.loads(current["ai_response_json"])
             analysis = AIAnalysisResponse(**ai_data)
 
-            # Only use approved tags
-            approved_tags = tag_storage.get_approved_tag_names()
-            tags_to_write = [
-                tag for tag in analysis.existing_tags_used if tag in approved_tags
-            ]
+            tags_to_write = keywords_to_write(
+                analysis, tag_storage.get_approved_tag_names()
+            )
 
             success = exif_handler.add_exif_metadata(
                 photo_path,
@@ -611,7 +610,9 @@ class PhotoProcessor:
                 success = exif_handler.add_exif_metadata(
                     photo_path,
                     analysis.rating,
-                    approved_tags,
+                    keywords_to_write(
+                        analysis, TagReviewStorage().get_approved_tag_names()
+                    ),
                     analysis.description,
                     analysis.notes,
                 )

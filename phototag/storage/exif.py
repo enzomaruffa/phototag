@@ -2,11 +2,39 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, NamedTuple, Optional, Dict, Any
 import logging
 import subprocess
 import traceback
 import json
+import re
+
+
+class CaptureContext(NamedTuple):
+    """Where and when a photo was taken, as the camera recorded it."""
+
+    latitude: Optional[float]
+    longitude: Optional[float]
+    taken_on: Optional[str]  # YYYY-MM-DD
+
+
+def parse_capture_context(raw: Dict[str, Any]) -> CaptureContext:
+    """CaptureContext from one exiftool -j -n record."""
+
+    def coordinate(key: str) -> Optional[float]:
+        try:
+            return float(raw[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    lat, lon = coordinate("GPSLatitude"), coordinate("GPSLongitude")
+    if lat is None or lon is None or (lat == 0 and lon == 0):
+        lat = lon = None
+    taken_on = None
+    match = re.match(r"(\d{4}):(\d{2}):(\d{2})", str(raw.get("DateTimeOriginal") or ""))
+    if match and match.group(1) != "0000":
+        taken_on = "-".join(match.groups())
+    return CaptureContext(lat, lon, taken_on)
 
 
 class EXIFHandler:
@@ -201,6 +229,28 @@ class EXIFHandler:
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse exiftool JSON output: {e}")
             return {}
+
+    def read_capture_context(self, photo_path: Path) -> CaptureContext:
+        """GPS position and capture day, for the AI prompt. One exiftool call."""
+        try:
+            result = subprocess.run(
+                [
+                    self.exiftool_path,
+                    "-j",
+                    "-n",
+                    "-GPSLatitude",
+                    "-GPSLongitude",
+                    "-DateTimeOriginal",
+                    str(photo_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            records = json.loads(result.stdout or "[]")
+        except (OSError, json.JSONDecodeError) as e:
+            logging.warning(f"Could not read capture context of {photo_path}: {e}")
+            records = []
+        return parse_capture_context(records[0] if records else {})
 
     def get_capture_date(self, photo_path: Path) -> Optional[str]:
         """The file's existing capture date (raw exiftool string), if any."""
