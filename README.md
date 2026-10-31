@@ -30,7 +30,8 @@ make upload           # upload processed/ to Immich, move to outbox/
 | Target | What it does |
 |---|---|
 | `make card` | Full run from an SD card: sync Immich checksums, import, match stacks, process, review tags, upload (`ALBUM=` optional) |
-| `make stacks` | Import sequence manifests and match their frames to inbox photos |
+| `make stacks` | Import sequence manifests, match their frames to inbox photos, list them |
+| `make stacks-export` | Copy each stack into its own folder for focus-stacking software (`OUT=dir`, `KIND=` optional) |
 | `make import` | Pick a mounted SD card and copy its new photos/videos into the inbox |
 | `make process` | Analyze inbox photos with AI (`WORKERS=4` to override) |
 | `make watch` | Watch the inbox and auto-process new files as they arrive |
@@ -87,6 +88,28 @@ Some sources — keychain cameras like the Kodak Charmera, film-lab scans — wr
 - **Capture-date inference.** For photos with no EXIF date, a date is resolved in order of trust: the **date stamp printed in the image** (the AI reads corner digits and returns them structured) → the **nearest same-folder neighbour** by filename sequence that already has a trusted date → **file mtime** as a last resort. The filename's trailing number then offsets the result by seconds, so `PICT0043` always sorts right after `PICT0042` even when both share a stamp date. The result is written as `DateTimeOriginal`/`CreateDate` — only ever when the file had none — and recorded in the state DB (`capture_date`, `capture_date_source`).
 
 Photos that already have an EXIF date are never touched; they serve as anchors for their dateless neighbours.
+
+### Named subjects
+
+The model names specific things it recognizes with confidence 0.7 or higher: an artwork ("Mona Lisa"), a landmark ("Eiffel Tower"), a species ("Rufous hornero"), a car model ("Porsche 911 (992)"), a well-known event. It never names private people, and names a public figure only when the scene makes it unambiguous. The prompt includes the GPS position (4 decimals) and capture date from EXIF when the file has them, which helps with places. There is no reverse geocoding.
+
+Names go into the description and become snake_case keywords (`mona_lisa`, `eiffel_tower`). These keywords skip tag review, because they are proper nouns and not vocabulary. Responses saved before this feature parse fine and simply have no named subjects.
+
+### Sequence stacks (Open Alpha Link)
+
+[Open Alpha Link](docs/SEQUENCE_MANIFEST.md) is an iOS remote for Sony bodies. Every multi-shot run (focus stack, exposure bracket, intervalometer, burst, bulb) writes a JSON manifest with the phone time of each shutter press. The camera can't tell us which files belong together, so phototag matches photos to those presses.
+
+**Getting manifests in.** `phototag stacks match` reads manifests from `SEQUENCE_MANIFEST_DIR` (the app's iCloud Drive folder by default) and from anywhere in the inbox, so AirDropping a manifest into `inbox/` works too. Other JSON files are ignored, and the inbox scan for photos never looks at JSON. Re-importing a manifest is a no-op, except that edited annotations replace the stored ones. If a stack's photos were already processed, `stacks match` warns and leaves those files alone.
+
+**Matching.** The camera clock is set by hand, so phototag searches for the clock offset (up to `STACK_MAX_CLOCK_SKEW_SECONDS`, default 120 s) that puts the most photos inside a press, with 1.5 s of tolerance. A RAW+JPEG pair and the images of one held press all belong to the same frame. A sequence counts as matched when at least 80% of its frames got a photo. Sequences whose photos aren't in the inbox yet stay unmatched and are retried on the next run. `make card` runs `stacks match` right after the card import.
+
+**Processing.** Only the middle frame of each stack (its JPEG, if shot RAW+JPEG) goes to the AI. The other members copy its rating, description, tags and named subjects, so a 24-frame focus stack costs one analysis. If that analysis failed, the members are analyzed on their own. Every member gets a kind keyword (`focus_stack`, `exposure_bracket`, `timelapse`, `burst`, `bulb`) and `stack_<id>`, plus the manifest's annotations: the title, the notes appended to the description, the tags, the lens (only when the file has no `LensModel`), and the frame position in `UserComment` (`focus_stack 7/24, in, step 16, nudge 100 ms, settle 1500 ms`). The annotated subject is passed to the AI as a hint.
+
+**Immich.** After `upload`, each sequence whose members are all on the server becomes an Immich stack with the representative as its cover. Assets are found by checksum. If the manifest names an album, the assets are added to it, unless `--album`/`ALBUM=` was given. A failure here only prints a warning.
+
+**Export.** `make stacks-export OUT=~/Stacks` (`phototag stacks export --out DIR [--kind focus_stack] [--raw/--jpeg] [--force]`) copies each stack into `DIR/<yyyy-mm-dd_HHMMSS>_<kind>_<id>/` with frame-ordered names (`001_DSC01234.ARW`) for Helicon Focus, Zerene or similar. Originals stay where they are. Folders that already exist are skipped unless `--force`.
+
+`phototag stacks list` shows every sequence with its frames matched, photos, offset and status.
 
 ### Duplicate detection
 

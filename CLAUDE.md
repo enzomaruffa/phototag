@@ -6,11 +6,12 @@ AI photo tagging + Immich upload pipeline: `inbox/ → (dedup check) → AI anal
 
 Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 
-- `make card` — sync-hashes → import-card → process → review → upload in one go
+- `make card` — sync-hashes → import-card → stacks match → process → review → upload in one go
 - `make import` — `phototag import-card`: pick a removable volume, hash files on the card, copy only unknown ones to `inbox/<volume>-<date>/` (`phototag/card.py`)
 - `make process` / `make watch` / `make retry` — analyze inbox (watch = polling loop)
 - `make review` — approve/reject AI-suggested tags, backfills EXIF afterwards
 - `make upload` — Immich upload over an SSH tunnel, then move to outbox
+- `make stacks` — `phototag stacks match` + `stacks list`: import Open Alpha Link manifests and match them to inbox photos. `make stacks-export OUT=dir` copies stacks into per-stack folders
 - `make sync-hashes` — mirror Immich asset checksums for cross-client dedup
 - `make status` / `make failed` / `make doctor` — inspect and reconcile state
 - `make check` — ruff check + ty + pytest + ruff format --check (run before committing)
@@ -25,6 +26,8 @@ Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 - `phototag/storage/exif.py` — exiftool wrapper; `phototag/storage/immich.py` — SSH tunnel + Immich API/CLI
 - `phototag/ai/openai_service.py` — vision analysis, JSON-mode responses, retry with backoff
 - `phototag/media.py` — extension sets, `file_hashes()`, `is_stable()`, `unique_destination()`
+- `phototag/stacks.py` — pure manifest parsing and the frame-matching algorithm from `docs/SEQUENCE_MANIFEST.md` (the contract with the iOS app; don't change its format)
+- `phototag/stack_ops.py` — stack workflows over the DB: manifest import, inbox matching, per-member context for processing, Immich stacks/albums, export
 - `phototag/dating.py` — capture-date inference for dateless sources (toy cams, film scans): printed-stamp parsing, neighbour anchors, filename-sequence offsets, and the AI source-class prompt hint
 
 ## Invariants — read before touching the pipeline
@@ -37,6 +40,7 @@ Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 - **Workers are separate processes** (ProcessPoolExecutor); anything passed to them must be picklable, and each creates its own service/DB instances. Dedup runs serially in the parent during enqueue precisely to avoid worker races.
 - **Sync-tool safety**: files with mtime < 30s are skipped (`is_stable`) because Syncthing delivers partial files that look corrupt.
 - **Capture dates are write-once and inferred conservatively.** `resolve_and_write_capture_date` never overwrites an existing EXIF date; inferred dates chain exif → printed stamp → neighbour anchor → mtime, and only `exif`/`stamp` sources may anchor neighbours (guesses don't compound). It runs at the EXIF step, BEFORE the post-EXIF hash, so `processed_hash` stays correct.
+- **Stacks reuse one analysis.** `process_batch` runs two worker waves: the first skips non-representative stack members (`claim_next_photo(defer_stack_followers=True)`), the second lets them copy the representative's saved `ai_response_json` into their own row. Stack keywords, named-subject keywords and manifest annotations go straight into EXIF without tag review, all at the EXIF step before the post-EXIF hash. `stack_members.filepath` uses the same inbox-path key as `photos.filepath`.
 - Schema changes go in `_init_database` as idempotent `PRAGMA table_info` + `ALTER TABLE` migrations — the DB at `.phototag/` is live and never recreated.
 
 ## Conventions
