@@ -13,7 +13,8 @@ Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 - `make upload` — Immich upload over an SSH tunnel, then move to outbox
 - `make sync-hashes` — mirror Immich asset checksums for cross-client dedup
 - `make status` / `make failed` / `make doctor` — inspect and reconcile state
-- `make check` — ruff check + ty + ruff format --check (run before committing)
+- `make check` — ruff check + ty + pytest + ruff format --check (run before committing)
+- `make test` — `uv run pytest -q`
 - `make fmt` — ruff format (black was removed; do not reintroduce it)
 
 ## Architecture
@@ -42,6 +43,6 @@ Everything runs through `uv` and the Makefile — never bare `python`/`pip`.
 
 - Formatting `ruff format`, linting `ruff check`, types `ty` — all three must pass (`make check`).
 - Type hints everywhere; `Optional[X]` explicitly, never a bare `= None` default on a typed param.
-- No test suite yet. Verify pipeline changes end-to-end with small `.mp4` files (videos skip AI, so the full intake → dedup → move flow runs without an OpenAI key) in a scratch directory — `ProcessingStateDB` keys off `Path.cwd()`.
+- Tests live in `tests/` (`make test`, also part of `make check`). They cover pure logic and mock OpenAI/Immich; never call the real APIs. Still verify pipeline changes end-to-end with small `.mp4` files (videos skip AI, so the full intake → dedup → move flow runs without an OpenAI key) in a scratch directory — `ProcessingStateDB` keys off `Path.cwd()`.
 - `.env` holds real credentials; `.env.example` is the template. New config vars must appear in `.env.example`, the README config table, and `phototag config`.
 - Prefer reusing existing credentials over new config: `immich-sync` reads the API key `immich login` stored (`read_cli_api_key()` in `storage/immich.py`) rather than requiring `IMMICH_API_KEY`.

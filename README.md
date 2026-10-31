@@ -139,5 +139,6 @@ uv sync --group dev
 make fmt        # ruff format
 make lint       # ruff check
 make typecheck  # ty
-make check      # lint + typecheck + format check
+make test       # pytest
+make check      # lint + typecheck + tests + format check
 ```
