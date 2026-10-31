@@ -1,7 +1,7 @@
 WORKERS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help setup card import stacks drive-export process watch retry review upload sync-hashes status failed doctor fmt lint typecheck test check
+.PHONY: help setup card import stacks stacks-export drive-export process watch retry review upload sync-hashes status failed doctor fmt lint typecheck test check
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -23,6 +23,10 @@ import: ## Copy new photos/videos from an SD card into the inbox (asks which car
 stacks: ## Import Open Alpha Link sequence manifests and match them to inbox photos
 	uv run phototag stacks match
 	uv run phototag stacks list
+
+stacks-export: ## Copy each stack into its own folder for focus-stacking software. OUT=dir KIND=focus_stack optional
+	$(if $(OUT),,$(error OUT=dir is required))
+	uv run phototag stacks export --out "$(OUT)" $(if $(KIND),--kind $(KIND))
 
 drive-export: ## Finished photos as JPEGs in one folder per rating. OUT=dir SINCE/UNTIL="YYYY-MM-DD[ HH:MM]"
 	uv run python scripts/drive_export.py $(if $(OUT),--out "$(OUT)") $(if $(SINCE),--since "$(SINCE)") $(if $(UNTIL),--until "$(UNTIL)")

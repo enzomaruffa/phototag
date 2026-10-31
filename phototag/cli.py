@@ -42,6 +42,7 @@ from phototag.media import (
     unique_destination,
 )
 from phototag.stack_ops import (
+    export_stacks,
     import_manifests,
     link_immich_stacks,
     manifest_dirs,
@@ -1224,6 +1225,38 @@ def stacks_list():
         "Offset = phone clock minus camera clock (positive: the camera runs behind)",
         style="dim",
     )
+
+
+@stacks_app.command("export")
+def stacks_export(
+    out: Path = typer.Option(..., "--out", "-o", help="Folder to export into"),
+    kind: Optional[str] = typer.Option(
+        None, "--kind", "-k", help="Only this kind, e.g. focus_stack"
+    ),
+    raw: Optional[bool] = typer.Option(
+        None, "--raw/--jpeg", help="Only RAW files, or only JPEGs (default: both)"
+    ),
+    force: bool = typer.Option(False, "--force", help="Re-export existing folders"),
+):
+    """Copy each stack's frames into its own folder, for focus-stacking software."""
+    search_dirs = [
+        Path(os.getenv("OUTBOX_DIR", "./outbox")),
+        Path(os.getenv("PROCESSED_DIR", "./processed")),
+    ]
+    summary = export_stacks(
+        ProcessingStateDB(), out, search_dirs, kind=kind, raw=raw, force=force
+    )
+    for folder in summary.exported:
+        console.print(f"📂 {folder}")
+    console.print(
+        f"✅ Exported {len(summary.exported)} stacks"
+        f" ({summary.skipped} already exported - use --force to redo them)"
+    )
+    if summary.missing:
+        console.print(
+            f"⚠️  {len(summary.missing)} frames are no longer on disk and were skipped",
+            style="yellow",
+        )
 
 
 @app.command()

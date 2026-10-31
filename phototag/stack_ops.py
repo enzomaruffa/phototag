@@ -7,12 +7,14 @@ data and persists the results.
 import json
 import logging
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .media import find_media_files
+from .media import RAW_EXTENSIONS, find_media_files
 from .stacks import (
+    JPEG_SUFFIXES,
     Manifest,
     Shot,
     find_manifest_files,
@@ -322,4 +324,78 @@ def link_immich_stacks(
                 summary.albums += 1
         except Exception as e:
             summary.errors.append(f"{manifest.short_id}: {e}")
+    return summary
+
+
+@dataclass
+class ExportSummary:
+    exported: List[Path] = field(default_factory=list)
+    skipped: int = 0
+    missing: List[str] = field(default_factory=list)
+
+
+def member_location(member: Dict, search_dirs: List[Path]) -> Optional[Path]:
+    """Where a member's file lives now: its recorded location, else by name."""
+    for candidate in (member["moved_to_path"], member["filepath"]):
+        if candidate and Path(candidate).is_file():
+            return Path(candidate)
+    name = Path(member["filepath"]).name
+    for directory in search_dirs:
+        if (directory / name).is_file():
+            return directory / name
+    return None
+
+
+def export_folder_name(manifest: Manifest) -> str:
+    return f"{manifest.started_at:%Y-%m-%d_%H%M%S}_{manifest.kind}_{manifest.short_id}"
+
+
+def export_stacks(
+    state_db: ProcessingStateDB,
+    out_dir: Path,
+    search_dirs: List[Path],
+    kind: Optional[str] = None,
+    raw: Optional[bool] = None,
+    force: bool = False,
+) -> ExportSummary:
+    """Copy each matched stack into its own folder, files named in frame order.
+
+    raw=True keeps only RAW files, raw=False only JPEGs, None keeps both.
+    Originals are never moved. A stack whose folder exists is skipped
+    unless force is set.
+    """
+    summary = ExportSummary()
+    for sequence in state_db.get_sequences(status="matched"):
+        manifest = parse_manifest(json.loads(sequence["manifest_json"]))
+        if manifest is None or (kind and manifest.kind != kind):
+            continue
+        dest = out_dir / export_folder_name(manifest)
+        if dest.exists() and not force:
+            summary.skipped += 1
+            continue
+
+        files = []
+        for member in state_db.get_stack_members(manifest.id):
+            suffix = Path(member["filepath"]).suffix.lower()
+            if raw is True and suffix not in RAW_EXTENSIONS:
+                continue
+            if raw is False and suffix not in JPEG_SUFFIXES:
+                continue
+            source = member_location(member, search_dirs)
+            if source is None:
+                summary.missing.append(member["filepath"])
+                continue
+            files.append((source, f"{member['position']:03d}_{source.name}"))
+        if not files:
+            continue
+
+        partial = dest.with_name(dest.name + ".partial")
+        shutil.rmtree(partial, ignore_errors=True)
+        partial.mkdir(parents=True)
+        for source, name in files:
+            shutil.copy2(source, partial / name)
+        if dest.exists():
+            shutil.rmtree(dest)
+        partial.rename(dest)
+        summary.exported.append(dest)
     return summary
