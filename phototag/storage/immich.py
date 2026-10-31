@@ -7,7 +7,7 @@ import subprocess
 import time
 import requests
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import logging
 
 
@@ -249,6 +249,66 @@ class ImmichUploader:
         except Exception as e:
             logging.error(f"Failed to fetch asset checksums: {e}")
             return None
+
+    def asset_ids_by_checksum(
+        self, api_key: str, checksums: List[str]
+    ) -> Dict[str, str]:
+        """Immich asset id per SHA-1 (hex) for the checksums already on the server.
+
+        bulk-upload-check reports an existing checksum as a duplicate along
+        with its assetId; checksums it doesn't know are simply missing here.
+        """
+        if not checksums:
+            return {}
+        response = requests.post(
+            f"{self.immich_url}/api/assets/bulk-upload-check",
+            headers={"x-api-key": api_key},
+            json={"assets": [{"id": c, "checksum": c} for c in checksums]},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return {
+            result["id"]: result["assetId"]
+            for result in response.json().get("results", [])
+            if result.get("assetId")
+        }
+
+    def create_stack(self, api_key: str, asset_ids: List[str]) -> str:
+        """Stack the assets; the first id becomes the primary. Returns the stack id."""
+        response = requests.post(
+            f"{self.immich_url}/api/stacks",
+            headers={"x-api-key": api_key},
+            json={"assetIds": asset_ids},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()["id"]
+
+    def add_to_album(self, api_key: str, album_name: str, asset_ids: List[str]) -> None:
+        """Add assets to the album with this name, creating it when missing."""
+        headers = {"x-api-key": api_key}
+        response = requests.get(
+            f"{self.immich_url}/api/albums", headers=headers, timeout=30
+        )
+        response.raise_for_status()
+        album = next(
+            (a for a in response.json() if a.get("albumName") == album_name), None
+        )
+        if album is None:
+            response = requests.post(
+                f"{self.immich_url}/api/albums",
+                headers=headers,
+                json={"albumName": album_name, "assetIds": asset_ids},
+                timeout=30,
+            )
+        else:
+            response = requests.put(
+                f"{self.immich_url}/api/albums/{album['id']}/assets",
+                headers=headers,
+                json={"ids": asset_ids},
+                timeout=30,
+            )
+        response.raise_for_status()
 
     def upload_photos(
         self,

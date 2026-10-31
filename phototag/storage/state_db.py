@@ -187,6 +187,16 @@ class ProcessingStateDB:
                 )
             """)
 
+            sequence_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(sequences)")
+            }
+            # Immich stack id once the members are stacked on the server, and
+            # the album the annotations asked for once the assets are in it
+            if "immich_stack_id" not in sequence_columns:
+                conn.execute("ALTER TABLE sequences ADD COLUMN immich_stack_id TEXT")
+            if "immich_album" not in sequence_columns:
+                conn.execute("ALTER TABLE sequences ADD COLUMN immich_album TEXT")
+
             # Indexes for performance
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status)"
@@ -977,6 +987,33 @@ class ProcessingStateDB:
             row["filepath"]
             for row in conn.execute("SELECT filepath FROM stack_members")
         }
+
+    def set_sequence_immich(
+        self,
+        sequence_id: str,
+        stack_id: Optional[str] = None,
+        album: Optional[str] = None,
+    ) -> None:
+        with self.transaction() as conn:
+            if stack_id:
+                conn.execute(
+                    "UPDATE sequences SET immich_stack_id = ? WHERE id = ?",
+                    (stack_id, sequence_id),
+                )
+            if album:
+                conn.execute(
+                    "UPDATE sequences SET immich_album = ? WHERE id = ?",
+                    (album, sequence_id),
+                )
+
+    def record_new_location(self, old_path: str, new_path: str) -> None:
+        """A processed file moved again (upload -> outbox); keep moved_to_path true."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE photos SET moved_to_path = ?, updated_at = CURRENT_TIMESTAMP"
+                " WHERE moved_to_path = ?",
+                (new_path, old_path),
+            )
 
     def get_stack_membership(self, filepath: str) -> Optional[Dict]:
         """The sequence a photo belongs to, plus its representative's saved analysis."""

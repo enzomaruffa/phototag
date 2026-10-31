@@ -25,6 +25,7 @@ from .stacks import (
     pick_representative,
 )
 from .storage.exif import EXIFHandler
+from .storage.immich import ImmichUploader
 from .storage.state_db import PhotoStatus, ProcessingStateDB
 
 logger = logging.getLogger(__name__)
@@ -251,3 +252,74 @@ def member_description(description: str, stack: Optional[MemberContext]) -> str:
     if notes.notes:
         parts.append(notes.notes)
     return " ".join(p for p in parts if p)
+
+
+# A member in one of these hasn't reached Immich yet, so its stack waits
+IN_FLIGHT_STATUSES = {
+    PhotoStatus.PENDING.value,
+    PhotoStatus.LOCKED.value,
+    PhotoStatus.AI_ANALYZING.value,
+    PhotoStatus.AI_ANALYZED.value,
+    PhotoStatus.AWAITING_TAG_REVIEW.value,
+    PhotoStatus.EXIF_WRITING.value,
+    PhotoStatus.EXIF_WRITTEN.value,
+    PhotoStatus.MOVING.value,
+}
+
+
+@dataclass
+class ImmichStackSummary:
+    stacked: int = 0
+    albums: int = 0
+    waiting: int = 0
+    errors: List[str] = field(default_factory=list)
+
+
+def link_immich_stacks(
+    state_db: ProcessingStateDB,
+    uploader: ImmichUploader,
+    api_key: str,
+    album_override: Optional[str] = None,
+) -> ImmichStackSummary:
+    """Stack each fully uploaded sequence in Immich and file it in its album.
+
+    Assets are found by the SHA-1 of the uploaded bytes (processed_sha1).
+    The annotations' album is skipped when the upload named an album
+    explicitly. Errors are collected per sequence, never raised.
+    """
+    summary = ImmichStackSummary()
+    for sequence in state_db.get_sequences(status="matched"):
+        manifest = parse_manifest(json.loads(sequence["manifest_json"]))
+        if manifest is None:
+            continue
+        album = None if album_override else manifest.annotations.album
+        needs_stack = not sequence["immich_stack_id"]
+        needs_album = bool(album) and sequence["immich_album"] != album
+        if not (needs_stack or needs_album):
+            continue
+
+        members = state_db.get_stack_members(sequence["id"])
+        if any(m["status"] in IN_FLIGHT_STATUSES for m in members):
+            summary.waiting += 1
+            continue
+        # Failed or duplicate members have no asset of their own
+        uploaded = [m for m in members if m["status"] == PhotoStatus.PROCESSED.value]
+        uploaded.sort(key=lambda m: (not m["is_representative"], m["position"]))
+        checksums = [m["processed_sha1"] for m in uploaded if m["processed_sha1"]]
+        try:
+            ids = uploader.asset_ids_by_checksum(api_key, checksums)
+            if not checksums or any(c not in ids for c in checksums):
+                summary.waiting += 1  # not on the server yet
+                continue
+            asset_ids = [ids[c] for c in checksums]
+            if needs_stack and len(asset_ids) > 1:
+                stack_id = uploader.create_stack(api_key, asset_ids)
+                state_db.set_sequence_immich(sequence["id"], stack_id=stack_id)
+                summary.stacked += 1
+            if needs_album and album:
+                uploader.add_to_album(api_key, album, asset_ids)
+                state_db.set_sequence_immich(sequence["id"], album=album)
+                summary.albums += 1
+        except Exception as e:
+            summary.errors.append(f"{manifest.short_id}: {e}")
+    return summary

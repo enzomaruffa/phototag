@@ -43,6 +43,7 @@ from phototag.media import (
 )
 from phototag.stack_ops import (
     import_manifests,
+    link_immich_stacks,
     manifest_dirs,
     match_inbox,
     max_clock_skew,
@@ -72,7 +73,11 @@ logging.basicConfig(
 quiet_http_logs()
 
 
-def move_photos(photo_files: List[Path], destination_dir: Path) -> int:
+def move_photos(
+    photo_files: List[Path],
+    destination_dir: Path,
+    state_db: Optional[ProcessingStateDB] = None,
+) -> int:
     """Move media files to destination directory (EXIF metadata is embedded)."""
     moved_count = 0
 
@@ -80,6 +85,8 @@ def move_photos(photo_files: List[Path], destination_dir: Path) -> int:
         try:
             dest_photo = unique_destination(destination_dir, photo_path)
             shutil.move(str(photo_path), str(dest_photo))
+            if state_db:
+                state_db.record_new_location(str(photo_path), str(dest_photo))
             console.print(f"📦 Moved: {photo_path.name} → {dest_photo.name}")
             moved_count += 1
 
@@ -481,8 +488,10 @@ def upload(
                 # Move photos to destination directory
                 console.print("📦 Moving photos to destination directory...")
                 photo_files = find_media_files(source_dir)
-                moved_count = move_photos(photo_files, destination_dir)
+                state_db = ProcessingStateDB()
+                moved_count = move_photos(photo_files, destination_dir, state_db)
                 console.print(f"✅ Moved {moved_count} photos to {destination_dir}")
+                stack_in_immich(uploader, state_db, album)
 
             else:
                 console.print("❌ Upload failed", style="red")
@@ -491,6 +500,32 @@ def upload(
     except Exception as e:
         console.print(f"❌ Upload failed: {e}", style="red")
         raise typer.Exit(1)
+
+
+def stack_in_immich(
+    uploader: ImmichUploader, state_db: ProcessingStateDB, album: Optional[str]
+) -> None:
+    """Group uploaded sequences into Immich stacks. Warns, never fails the upload."""
+    if not state_db.get_sequences(status="matched"):
+        return
+    api_key = os.getenv("IMMICH_API_KEY") or read_cli_api_key()
+    if not api_key:
+        console.print(
+            "⚠️  No Immich API key (run 'immich login') - sequences were not stacked",
+            style="yellow",
+        )
+        return
+    try:
+        summary = link_immich_stacks(state_db, uploader, api_key, album_override=album)
+    except Exception as e:
+        console.print(f"⚠️  Could not stack sequences in Immich: {e}", style="yellow")
+        return
+    if summary.stacked:
+        console.print(f"🧱 Created {summary.stacked} Immich stacks")
+    if summary.albums:
+        console.print(f"🗂️  Added {summary.albums} sequences to their albums")
+    for error in summary.errors:
+        console.print(f"⚠️  Immich stack failed for {error}", style="yellow")
 
 
 @app.command()
