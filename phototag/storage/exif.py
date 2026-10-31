@@ -122,7 +122,7 @@ class EXIFHandler:
                 cmd.extend([f"-LensModel={lens}"])
 
             # Only execute if we have something to add
-            if len(cmd) > 3:  # More than just exiftool -overwrite_original
+            if len(cmd) > 2:  # More than just exiftool -overwrite_original
                 cmd.append(str(photo_path))
 
                 # Execute command
