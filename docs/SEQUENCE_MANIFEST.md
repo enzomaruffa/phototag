@@ -84,13 +84,13 @@ Timestamps come from the phone. The camera clock is set by hand and usually drif
 1. Convert each frame's `pressed_at`/`released_at` to local wall-clock time in `time_zone`.
 2. Candidates are photos whose EXIF `Model` equals `camera.model` (skip this filter when it is `null`), with a capture time within `started_at − max_skew` to `ended_at + max_skew`. Use `SubSecTimeOriginal` when present.
 3. For each candidate offset in `[−max_skew, +max_skew]`, a frame matches a photo when the photo's time shifted by the offset falls within `[pressed_at − 1.5 s, released_at + 1.5 s]`. A RAW+JPEG pair, or several images inside one held press, all match the same frame.
-4. Pick the offset that matches the most frames. Break ties by the smallest absolute offset.
+4. Pick the offset range that matches the most frames, then the one that places the most images, then the one closest to zero. Report the middle of that range: with whole-second EXIF times, every offset in it is equally likely.
 5. Accept the match when at least 80% of the frames matched. A held press counts as matched only if it gained at least one image.
 
 ## What a reader writes into each matched image
 
 - The annotations above.
 - Keywords for the kind (`focus_stack`, `exposure_bracket`, `timelapse` for an intervalometer, `burst`, `bulb`) and `stack_<first 8 chars of id, lowercase>`.
-- The frame position and plan in `UserComment`, for example `focus_stack 7/24, in, step 16, nudge 100 ms, settle 1500 ms`. Grouping uses the `stack_` keyword, because no EXIF or XMP field for it is portable across photo libraries.
+- The image's position in the set (image number / image count, so a held bracket reads `3/5` even though it is one press) and the plan in `UserComment`, for example `focus_stack 7/24, in, step 16, nudge 100 ms, settle 1500 ms`. Grouping uses the `stack_` keyword, because no EXIF or XMP field for it is portable across photo libraries.
 
 EXIF times have whole-second resolution without sub-seconds, so a 1.5 s tolerance is the floor. Two sequences shot back to back can only be told apart if the gap between them is larger than the skew window.

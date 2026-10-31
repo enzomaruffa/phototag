@@ -180,15 +180,15 @@ def test_held_press_collects_every_image_inside_it():
     assert len(result.assignments) == 5
 
 
-def test_ties_prefer_the_smallest_offset():
-    # A single short frame and one photo: a range of offsets matches; the
-    # one closest to zero wins.
+def test_reports_the_middle_of_the_matching_offset_range():
+    # A single short frame and one photo: every offset from 8.5 to 11.5 s
+    # matches, so the reported offset is the middle of that range.
     manifest = parse(manifest_dict(frames=1, press_s=0.0))
     shots = [Shot("inbox/a.JPG", LOCAL_START - timedelta(seconds=10), "ILCE-7M3")]
 
     result = match_sequence(manifest, shots, 120)
 
-    assert result.offset_seconds == pytest.approx(8.5)
+    assert result.offset_seconds == pytest.approx(10)
 
 
 def test_unrelated_photo_outside_the_window_is_not_assigned():

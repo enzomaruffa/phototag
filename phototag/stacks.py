@@ -344,16 +344,23 @@ def match_sequence(
     Within the offset ranges that reach the most frames, the probe whose
     one-frame-per-photo assignment keeps the most frames wins, then the one
     that places the most photos (a held press gains all its images), then
-    the smallest |offset|.
+    the range closest to zero. The reported offset is the middle of the
+    range, since whole-second EXIF times leave every offset in it equally
+    likely.
     """
     candidates = _candidates(manifest, shots, max_skew)
     best_count, regions = _best_regions(manifest, candidates, max_skew)
     best: Tuple[Tuple[int, int, float], float, Dict[str, int]] = ((0, 0, 0.0), 0.0, {})
     if best_count:
         for low, high in regions:
-            for probe in {low, high, (low + high) / 2, min(max(0.0, low), high)}:
+            middle = (low + high) / 2
+            for probe in (middle, low, high):
                 assignments = _assign(manifest, candidates, probe)
-                score = (len(set(assignments.values())), len(assignments), -abs(probe))
+                score = (
+                    len(set(assignments.values())),
+                    len(assignments),
+                    -abs(middle),
+                )
                 if score > best[0]:
                     best = (score, probe, assignments)
     _, offset, assignments = best
