@@ -32,7 +32,8 @@ from .storage.state_db import PhotoStatus, ProcessingStateDB
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MANIFEST_DIR = "~/Library/Mobile Documents/iCloud~dev~enzomaruffa~openalphalink/Documents/Sequences"
+# Where `phototag receive` writes manifests pushed by the app, relative to cwd like the DB
+RECEIVED_MANIFEST_DIR = Path(".phototag/manifests")
 DEFAULT_MAX_SKEW_S = 120.0
 
 # Member statuses whose files already carry their EXIF; annotations edited
@@ -45,9 +46,10 @@ WRITTEN_STATUSES = {
 
 
 def manifest_dirs() -> List[Path]:
-    """SEQUENCE_MANIFEST_DIR as paths (comma list allowed)."""
-    raw = os.getenv("SEQUENCE_MANIFEST_DIR") or DEFAULT_MANIFEST_DIR
-    return [Path(d.strip()).expanduser() for d in raw.split(",") if d.strip()]
+    """The received-manifests dir, then SEQUENCE_MANIFEST_DIR (comma list allowed)."""
+    raw = os.getenv("SEQUENCE_MANIFEST_DIR") or ""
+    extra = [Path(d.strip()).expanduser() for d in raw.split(",") if d.strip()]
+    return [RECEIVED_MANIFEST_DIR, *extra]
 
 
 def max_clock_skew() -> float:

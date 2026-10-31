@@ -49,6 +49,7 @@ from phototag.stack_ops import (
     match_inbox,
     max_clock_skew,
 )
+from phototag import receiver
 from phototag.storage.tag_review import TagReviewStorage
 from phototag.storage.exif import EXIFHandler
 from phototag.storage.immich import ImmichUploader, read_cli_api_key
@@ -1260,6 +1261,17 @@ def stacks_export(
 
 
 @app.command()
+def receive(
+    port: int = typer.Option(
+        None, help="Port to listen on (default: PHOTOTAG_RECEIVE_PORT or 8765)"
+    ),
+    qr: bool = typer.Option(True, help="Print the pairing QR code"),
+):
+    """Accept sequence manifests from Open Alpha Link over the local network."""
+    receiver.serve(console, port or receiver.receive_port(), show_qr=qr)
+
+
+@app.command()
 def config():
     """Show configuration and setup instructions."""
     console.print("📋 Configuration Requirements:")
@@ -1279,7 +1291,11 @@ def config():
         ("OUTBOX_DIR", "Final directory for uploaded photos (default: ./outbox)"),
         (
             "SEQUENCE_MANIFEST_DIR",
-            "Open Alpha Link manifest folders, comma list (default: its iCloud Drive folder)",
+            "Extra Open Alpha Link manifest folders, comma list (default: none; received ones are always read)",
+        ),
+        (
+            "PHOTOTAG_RECEIVE_PORT",
+            f"Port for 'phototag receive' (default: {receiver.DEFAULT_PORT})",
         ),
         (
             "STACK_MAX_CLOCK_SKEW_SECONDS",

@@ -11,11 +11,17 @@ setup: ## Install dependencies
 
 card: ## SD card → inbox → dedup → AI → tag review → Immich upload, in one go. ALBUM="name" optional
 	-uv run phototag immich-sync
-	uv run phototag import-card
-	uv run phototag stacks match
+	@mkdir -p .phototag; uv run phototag receive --no-qr > .phototag/receive.log 2>&1 & pid=$$!; \
+	trap 'kill $$pid 2>/dev/null' EXIT; \
+	echo "📡 Receiving manifests from Open Alpha Link while the card copies (log: .phototag/receive.log)"; \
+	uv run phototag import-card && uv run phototag stacks match
 	uv run phototag process --workers $(WORKERS)
 	uv run phototag review-tags
 	uv run phototag upload $(if $(ALBUM),--album "$(ALBUM)")
+
+.PHONY: receive
+receive: ## Accept manifests pushed by Open Alpha Link on the local network (prints the pairing QR)
+	uv run phototag receive
 
 import: ## Copy new photos/videos from an SD card into the inbox (asks which card)
 	uv run phototag import-card
