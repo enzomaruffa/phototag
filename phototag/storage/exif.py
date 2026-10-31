@@ -252,6 +252,33 @@ class EXIFHandler:
             records = []
         return parse_capture_context(records[0] if records else {})
 
+    def read_shot_metadata(self, paths: List[Path]) -> List[Dict[str, Any]]:
+        """DateTimeOriginal, SubSecTimeOriginal and Model of many files, one exiftool call."""
+        if not paths:
+            return []
+        try:
+            result = subprocess.run(
+                [
+                    self.exiftool_path,
+                    "-json",
+                    "-fast2",
+                    "-DateTimeOriginal",
+                    "-SubSecTimeOriginal",
+                    "-Model",
+                    "-@",
+                    "-",
+                ],
+                input="\n".join(str(p) for p in paths),
+                capture_output=True,
+                text=True,
+            )
+            # exiftool exits non-zero when some files are unreadable but
+            # still prints the records of the rest
+            return json.loads(result.stdout) if result.stdout.strip() else []
+        except (OSError, json.JSONDecodeError) as e:
+            logging.error(f"Failed to read capture times: {e}")
+            return []
+
     def get_capture_date(self, photo_path: Path) -> Optional[str]:
         """The file's existing capture date (raw exiftool string), if any."""
         existing = self._read_metadata_raw(photo_path)

@@ -1,7 +1,7 @@
 WORKERS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help setup card import drive-export process watch retry review upload sync-hashes status failed doctor fmt lint typecheck test check
+.PHONY: help setup card import stacks drive-export process watch retry review upload sync-hashes status failed doctor fmt lint typecheck test check
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -12,12 +12,17 @@ setup: ## Install dependencies
 card: ## SD card → inbox → dedup → AI → tag review → Immich upload, in one go. ALBUM="name" optional
 	-uv run phototag immich-sync
 	uv run phototag import-card
+	uv run phototag stacks match
 	uv run phototag process --workers $(WORKERS)
 	uv run phototag review-tags
 	uv run phototag upload $(if $(ALBUM),--album "$(ALBUM)")
 
 import: ## Copy new photos/videos from an SD card into the inbox (asks which card)
 	uv run phototag import-card
+
+stacks: ## Import Open Alpha Link sequence manifests and match them to inbox photos
+	uv run phototag stacks match
+	uv run phototag stacks list
 
 drive-export: ## Finished photos as JPEGs in one folder per rating. OUT=dir SINCE/UNTIL="YYYY-MM-DD[ HH:MM]"
 	uv run python scripts/drive_export.py $(if $(OUT),--out "$(OUT)") $(if $(SINCE),--since "$(SINCE)") $(if $(UNTIL),--until "$(UNTIL)")

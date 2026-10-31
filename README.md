@@ -29,7 +29,8 @@ make upload           # upload processed/ to Immich, move to outbox/
 
 | Target | What it does |
 |---|---|
-| `make card` | Full run from an SD card: sync Immich checksums, import, process, review tags, upload (`ALBUM=` optional) |
+| `make card` | Full run from an SD card: sync Immich checksums, import, match stacks, process, review tags, upload (`ALBUM=` optional) |
+| `make stacks` | Import sequence manifests and match their frames to inbox photos |
 | `make import` | Pick a mounted SD card and copy its new photos/videos into the inbox |
 | `make process` | Analyze inbox photos with AI (`WORKERS=4` to override) |
 | `make watch` | Watch the inbox and auto-process new files as they arrive |
@@ -62,6 +63,8 @@ Set in `.env` (see `.env.example`):
 | `IMMICH_SSH_CONFIG_NAME` | SSH config entry for the Immich server tunnel. A comma list (`home-lan,home-remote`) uses the first one that answers |
 | `IMMICH_SERVER_HOST` + `IMMICH_SERVER_USER` | Alternative to the SSH config entry |
 | `IMMICH_API_KEY` | Optional — `immich-sync` reuses the key stored by `immich login`; set this only to override it |
+| `SEQUENCE_MANIFEST_DIR` | Folders holding Open Alpha Link sequence manifests, comma list allowed (default: the app's iCloud Drive folder, `~/Library/Mobile Documents/iCloud~dev~enzomaruffa~openalphalink/Documents/Sequences`). Manifests dropped anywhere in the inbox are read too |
+| `STACK_MAX_CLOCK_SKEW_SECONDS` | Largest camera-vs-phone clock difference the stack matcher searches (default `120`) |
 
 `phototag config` shows what's set and what's missing.
 

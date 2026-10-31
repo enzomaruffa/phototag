@@ -41,6 +41,12 @@ from phototag.media import (
     is_video,
     unique_destination,
 )
+from phototag.stack_ops import (
+    import_manifests,
+    manifest_dirs,
+    match_inbox,
+    max_clock_skew,
+)
 from phototag.storage.tag_review import TagReviewStorage
 from phototag.storage.exif import EXIFHandler
 from phototag.storage.immich import ImmichUploader, read_cli_api_key
@@ -51,6 +57,10 @@ from phototag.processing.photo_processor import PhotoProcessor, quiet_http_logs
 load_dotenv()
 
 app = typer.Typer(help="AI-powered photo tagging and upload system for Immich")
+stacks_app = typer.Typer(
+    help="Group multi-shot runs (focus stacks, brackets, ...) from Open Alpha Link manifests"
+)
+app.add_typer(stacks_app, name="stacks")
 console = Console()
 
 # Log through the rich console so messages print above live progress bars
@@ -1113,6 +1123,64 @@ def db_stats():
                 )
 
 
+@stacks_app.command("match")
+def stacks_match():
+    """Import sequence manifests and match their frames to photos in the inbox."""
+    inbox_dir = Path(os.getenv("INBOX_DIR", "./inbox"))
+    directories = [*manifest_dirs(), inbox_dir]
+    state_db = ProcessingStateDB()
+
+    summary = import_manifests(state_db, directories)
+    console.print(
+        f"📥 {summary.imported} new manifests imported"
+        f" ({summary.already_known} already known)"
+    )
+    match_inbox(state_db, inbox_dir, max_clock_skew(), summary=summary)
+    if summary.matched:
+        console.print(f"🧱 Matched {len(summary.matched)} sequences to inbox photos")
+    if summary.unmatched:
+        console.print(
+            f"⏳ {len(summary.unmatched)} sequences have no matching photos in the inbox yet",
+            style="yellow",
+        )
+    if not (summary.matched or summary.unmatched):
+        console.print("✅ No sequences waiting for photos")
+
+
+@stacks_app.command("list")
+def stacks_list():
+    """Show imported sequences and how well they matched."""
+    sequences = ProcessingStateDB().get_sequences()
+    if not sequences:
+        console.print("💭 No sequences imported - run 'phototag stacks match'")
+        return
+
+    table = Table(title="Sequences")
+    table.add_column("Kind")
+    table.add_column("Started (local)")
+    table.add_column("Frames", justify="right")
+    table.add_column("Photos", justify="right")
+    table.add_column("Offset", justify="right")
+    table.add_column("Status")
+    table.add_column("Id")
+    for row in sequences:
+        offset = row["matched_offset_seconds"]
+        table.add_row(
+            row["kind"],
+            (row["started_at"] or "")[:19].replace("T", " "),
+            f"{row['matched_frames'] or 0}/{row['frame_count'] or 0}",
+            str(row["member_count"]),
+            f"{offset:+.1f} s" if offset is not None else "-",
+            row["status"],
+            row["id"][:8].lower(),
+        )
+    console.print(table)
+    console.print(
+        "Offset = phone clock minus camera clock (positive: the camera runs behind)",
+        style="dim",
+    )
+
+
 @app.command()
 def config():
     """Show configuration and setup instructions."""
@@ -1131,6 +1199,14 @@ def config():
             "Intermediate directory for processed photos (default: ./processed)",
         ),
         ("OUTBOX_DIR", "Final directory for uploaded photos (default: ./outbox)"),
+        (
+            "SEQUENCE_MANIFEST_DIR",
+            "Open Alpha Link manifest folders, comma list (default: its iCloud Drive folder)",
+        ),
+        (
+            "STACK_MAX_CLOCK_SKEW_SECONDS",
+            "Largest camera-vs-phone clock difference to search (default: 120)",
+        ),
     ]
 
     optional_vars = [

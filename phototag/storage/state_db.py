@@ -160,9 +160,40 @@ class ProcessingStateDB:
             if "pixel_hash" not in columns:
                 conn.execute("ALTER TABLE photos ADD COLUMN pixel_hash TEXT")
 
+            # Open Alpha Link sequence manifests (see phototag.stacks). One row
+            # per manifest id; members point at photos by their inbox filepath.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sequences (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    source_path TEXT,
+                    started_at TEXT,
+                    frame_count INTEGER,
+                    imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    matched_offset_seconds REAL,
+                    matched_frames INTEGER,
+                    status TEXT NOT NULL DEFAULT 'unmatched'
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS stack_members (
+                    sequence_id TEXT NOT NULL,
+                    filepath TEXT NOT NULL,
+                    frame_index INTEGER,
+                    position INTEGER,
+                    is_representative INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (sequence_id, filepath)
+                )
+            """)
+
             # Indexes for performance
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_stack_members_filepath"
+                " ON stack_members(filepath)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_photos_worker ON photos(worker_id)"
@@ -823,6 +854,111 @@ class ProcessingStateDB:
         except sqlite3.Error as e:
             logger.error(f"Failed to delete photo record {filepath}: {e}")
             return False
+
+    def import_sequence(
+        self,
+        sequence_id: str,
+        kind: str,
+        manifest_json: str,
+        source_path: str,
+        started_at: str,
+        frame_count: int,
+    ) -> bool:
+        """Store a manifest; False when this id was imported before (no-op)."""
+        with self.transaction() as conn:
+            result = conn.execute(
+                """
+                INSERT OR IGNORE INTO sequences
+                (id, kind, manifest_json, source_path, started_at, frame_count)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    sequence_id,
+                    kind,
+                    manifest_json,
+                    source_path,
+                    started_at,
+                    frame_count,
+                ),
+            )
+            return result.rowcount > 0
+
+    def get_sequences(self, status: Optional[str] = None) -> List[Dict]:
+        """Sequences with their member count, oldest first."""
+        conn = self._get_connection()
+        query = """
+            SELECT s.*, COUNT(m.filepath) AS member_count
+            FROM sequences s LEFT JOIN stack_members m ON m.sequence_id = s.id
+            {where}
+            GROUP BY s.id ORDER BY s.started_at
+        """
+        if status:
+            rows = conn.execute(query.format(where="WHERE s.status = ?"), (status,))
+        else:
+            rows = conn.execute(query.format(where=""))
+        return [dict(row) for row in rows]
+
+    def record_sequence_attempt(
+        self, sequence_id: str, offset_seconds: float, matched_frames: int
+    ) -> None:
+        """Remember the best (rejected) match so 'stacks list' can show it."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE sequences SET matched_offset_seconds = ?, matched_frames = ?
+                WHERE id = ? AND status = 'unmatched'
+            """,
+                (offset_seconds, matched_frames, sequence_id),
+            )
+
+    def record_sequence_match(
+        self,
+        sequence_id: str,
+        offset_seconds: float,
+        matched_frames: int,
+        members: List[tuple],
+    ) -> None:
+        """Mark a sequence matched with its (filepath, frame_index, position, is_rep) members."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE sequences
+                SET status = 'matched', matched_offset_seconds = ?, matched_frames = ?
+                WHERE id = ?
+            """,
+                (offset_seconds, matched_frames, sequence_id),
+            )
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO stack_members
+                (sequence_id, filepath, frame_index, position, is_representative)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                [(sequence_id, *member) for member in members],
+            )
+
+    def get_stack_member_paths(self) -> set:
+        """Inbox filepaths that already belong to a matched sequence."""
+        conn = self._get_connection()
+        return {
+            row["filepath"]
+            for row in conn.execute("SELECT filepath FROM stack_members")
+        }
+
+    def get_stack_members(self, sequence_id: str) -> List[Dict]:
+        """Members in shooting order, joined with their photo record."""
+        conn = self._get_connection()
+        rows = conn.execute(
+            """
+            SELECT m.filepath, m.frame_index, m.position, m.is_representative,
+                   p.status, p.moved_to_path, p.processed_sha1
+            FROM stack_members m LEFT JOIN photos p ON p.filepath = m.filepath
+            WHERE m.sequence_id = ?
+            ORDER BY m.position, m.filepath
+        """,
+            (sequence_id,),
+        )
+        return [dict(row) for row in rows]
 
     def close(self):
         """Close database connection."""
