@@ -526,10 +526,20 @@ def tag_merged_image(
 
 
 def _inbox_destination(
-    state_db: ProcessingStateDB, inbox_dir: Path, jpeg: Path
+    state_db: ProcessingStateDB,
+    inbox_dir: Path,
+    jpeg: Path,
+    previous: Optional[str],
 ) -> Path:
-    """A free inbox path, also unused as a photos key (an earlier merge's copy
-    that already moved on keeps its record under that path)."""
+    """Where the merged JPEG goes in the inbox.
+
+    An earlier copy the pipeline hasn't picked up yet is replaced. Otherwise
+    the path must be free on disk and unused as a photos key, since a copy
+    that already moved on keeps its record under its inbox path.
+    """
+    if previous and Path(previous).is_file():
+        if state_db.get_photo_status(previous) is None:
+            return Path(previous)
     dest = unique_destination(inbox_dir, jpeg)
     if state_db.get_photo_status(str(dest)) is not None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -603,7 +613,9 @@ def merge_stacks(
         inbox_copy = None
         if inbox_dir is not None:
             inbox_dir.mkdir(parents=True, exist_ok=True)
-            inbox_copy = _inbox_destination(state_db, inbox_dir, jpeg)
+            inbox_copy = _inbox_destination(
+                state_db, inbox_dir, jpeg, sequence["merged_inbox_path"]
+            )
             shutil.copy2(jpeg, inbox_copy)
         state_db.set_sequence_merged(
             manifest.id, str(jpeg), str(inbox_copy) if inbox_copy else None

@@ -230,6 +230,19 @@ def test_forced_remerge_picks_a_new_inbox_key(tmp_path):
     assert sequence is not None and sequence["merged_inbox_path"] == str(copy)
 
 
+def test_forced_remerge_replaces_a_copy_still_waiting_in_the_inbox(tmp_path):
+    db, _ = setup_stack(tmp_path)
+    inbox = tmp_path / "inbox"
+    first = merge_stacks(db, tmp_path / "merged", [], inbox_dir=inbox).merged[0]
+
+    second = merge_stacks(db, tmp_path / "merged", [], inbox_dir=inbox, force=True)
+
+    assert second.merged[0].inbox_copy == first.inbox_copy
+    assert sorted(p.name for p in inbox.glob("*.jpg")) == [
+        "2026-10-31_140322_focus_stack_3f9a1c2e_merged.jpg"
+    ]
+
+
 def test_only_focus_stacks_merge_and_id_filters(tmp_path):
     db, _ = setup_stack(tmp_path)
 
