@@ -161,3 +161,32 @@ def _positions(ordered: List[str]) -> Dict[str, int]:
         for path in group:
             positions[path] = number
     return positions
+
+
+@dataclass(frozen=True)
+class MemberContext:
+    """What processing needs to know about a photo that belongs to a stack."""
+
+    manifest: Manifest
+    frame_index: int
+    position: int
+    is_representative: bool
+    representative_analysis: Optional[str]  # saved ai_response_json
+
+
+def member_context(
+    state_db: ProcessingStateDB, filepath: str
+) -> Optional[MemberContext]:
+    row = state_db.get_stack_membership(filepath)
+    if not row:
+        return None
+    manifest = parse_manifest(json.loads(row["manifest_json"]))
+    if manifest is None:
+        return None
+    return MemberContext(
+        manifest=manifest,
+        frame_index=row["frame_index"],
+        position=row["position"],
+        is_representative=bool(row["is_representative"]),
+        representative_analysis=row["representative_ai_response_json"],
+    )

@@ -353,9 +353,17 @@ class ProcessingStateDB:
             return False
 
     def claim_next_photo(
-        self, worker_id: str, include_awaiting_tags: bool = True
+        self,
+        worker_id: str,
+        include_awaiting_tags: bool = True,
+        defer_stack_followers: bool = False,
     ) -> Optional[str]:
-        """Atomically claim the next pending photo for processing."""
+        """Atomically claim the next pending photo for processing.
+
+        With defer_stack_followers, stack members other than the
+        representative are left for a later pass, so they can reuse its
+        analysis instead of being sent to the AI.
+        """
         with self.transaction() as conn:
             # Build list of statuses to claim from
             statuses = [PhotoStatus.PENDING.value]
@@ -365,18 +373,27 @@ class ProcessingStateDB:
             # Find and lock next available photo
             placeholders = ",".join("?" * len(statuses))
             result = conn.execute(
-                f"""
+                """
                 UPDATE photos 
                 SET status = ?, worker_id = ?, locked_at = CURRENT_TIMESTAMP, 
                     updated_at = CURRENT_TIMESTAMP
                 WHERE filepath IN (
                     SELECT filepath FROM photos 
                     WHERE status IN ({placeholders})
+                    {follower_filter}
                     ORDER BY created_at
                     LIMIT 1
                 )
                 RETURNING filepath
-            """,
+            """.format(
+                    placeholders=placeholders,
+                    follower_filter=(
+                        "AND filepath NOT IN (SELECT filepath FROM stack_members"
+                        " WHERE is_representative = 0)"
+                        if defer_stack_followers
+                        else ""
+                    ),
+                ),
                 [PhotoStatus.LOCKED.value, worker_id] + statuses,
             )
 
@@ -944,6 +961,26 @@ class ProcessingStateDB:
             row["filepath"]
             for row in conn.execute("SELECT filepath FROM stack_members")
         }
+
+    def get_stack_membership(self, filepath: str) -> Optional[Dict]:
+        """The sequence a photo belongs to, plus its representative's saved analysis."""
+        conn = self._get_connection()
+        row = conn.execute(
+            """
+            SELECT m.sequence_id, m.frame_index, m.position, m.is_representative,
+                   s.manifest_json, r.filepath AS representative,
+                   rp.ai_response_json AS representative_ai_response_json
+            FROM stack_members m
+            JOIN sequences s ON s.id = m.sequence_id
+            LEFT JOIN stack_members r
+              ON r.sequence_id = m.sequence_id AND r.is_representative = 1
+            LEFT JOIN photos rp ON rp.filepath = r.filepath
+            WHERE m.filepath = ?
+            LIMIT 1
+        """,
+            (filepath,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def get_stack_members(self, sequence_id: str) -> List[Dict]:
         """Members in shooting order, joined with their photo record."""

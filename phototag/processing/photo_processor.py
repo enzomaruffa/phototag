@@ -19,6 +19,7 @@ from ..storage.tag_review import TagReviewStorage
 from ..storage.exif import EXIFHandler
 from ..storage.state_db import ProcessingStateDB, PhotoStatus
 from ..models.ai import AIAnalysisResponse, keywords_to_write
+from ..stack_ops import MemberContext, member_context
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ def process_worker_function(
     inbox_dir: str,
     processed_dir: str,
     force_process: bool = True,
+    defer_stack_followers: bool = False,
 ) -> Dict[str, int]:
     """Worker process for photo processing."""
     # Each worker creates its own service instances
@@ -61,7 +63,9 @@ def process_worker_function(
     for _ in range(max_iterations):
         # Claim next photo (including those awaiting tag review if force_process=True)
         photo_path = state_db.claim_next_photo(
-            worker_id, include_awaiting_tags=force_process
+            worker_id,
+            include_awaiting_tags=force_process,
+            defer_stack_followers=defer_stack_followers,
         )
         if not photo_path:
             break  # No more photos to process
@@ -146,6 +150,23 @@ def resolve_and_write_capture_date(
         return {}
 
 
+def stack_tags(stack: Optional[MemberContext]) -> List[str]:
+    """Keywords a stack member gets on top of its own (kind + stack id)."""
+    return stack.manifest.tags if stack else []
+
+
+def reused_stack_analysis(
+    stack: Optional[MemberContext],
+) -> Optional[AIAnalysisResponse]:
+    """The representative's analysis, for a stack member that isn't it."""
+    if not stack or stack.is_representative or not stack.representative_analysis:
+        return None
+    try:
+        return AIAnalysisResponse.model_validate_json(stack.representative_analysis)
+    except ValueError:
+        return None
+
+
 def process_single_photo(
     photo_path: Path,
     ai_service: OpenAIService,
@@ -186,6 +207,8 @@ def process_single_photo(
             )
             return PhotoStatus.PROCESSED
 
+        stack = member_context(state_db, filepath)
+
         # Determine where to resume from. Branch on whether an analysis is already
         # saved (not on status): claimed photos are always in 'locked', so a photo
         # claimed from awaiting_tag_review would otherwise be re-analyzed and
@@ -194,18 +217,24 @@ def process_single_photo(
             # Need to do AI analysis
             state_db.update_photo_status(filepath, PhotoStatus.AI_ANALYZING)
 
-            existing_tags = tag_storage.get_all_available_tags()
-            capture_ctx = exif_handler.read_capture_context(photo_path)
+            reused = reused_stack_analysis(stack)
+            if reused is not None:
+                # Same scene as the stack's representative: reuse its analysis
+                # instead of paying for a near-identical one
+                analysis = reused
+            else:
+                existing_tags = tag_storage.get_all_available_tags()
+                capture_ctx = exif_handler.read_capture_context(photo_path)
 
-            # Run async function in sync context
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                analysis = loop.run_until_complete(
-                    ai_service.analyze_photo(photo_path, existing_tags, capture_ctx)
-                )
-            finally:
-                loop.close()
+                # Run async function in sync context
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    analysis = loop.run_until_complete(
+                        ai_service.analyze_photo(photo_path, existing_tags, capture_ctx)
+                    )
+                finally:
+                    loop.close()
 
             # Save AI response
             state_db.update_photo_status(
@@ -258,7 +287,7 @@ def process_single_photo(
             analysis = AIAnalysisResponse(**ai_data)
 
             tags_to_write = keywords_to_write(
-                analysis, tag_storage.get_approved_tag_names()
+                analysis, tag_storage.get_approved_tag_names(), stack_tags(stack)
             )
 
             success = exif_handler.add_exif_metadata(
@@ -339,6 +368,7 @@ class PhotoProcessor:
         # Processing control
         self._shutdown_requested = False
         self._original_sigint = None
+        self._active_futures: list = []
 
     def process_batch(
         self,
@@ -471,46 +501,31 @@ class PhotoProcessor:
         with ProcessPoolExecutor(
             max_workers=self.worker_count, initializer=_init_worker
         ) as executor:
-            # Submit initial workers - pass only serializable data
-            futures = []
-            for i in range(self.worker_count):
-                worker_id = f"worker_{i}"
-                future = executor.submit(
-                    process_worker_function,
-                    worker_id,
-                    self.api_key,
-                    str(self.inbox_dir),
-                    str(self.processed_dir),
-                    force_process,
-                )
-                futures.append(future)
-
-            # Monitor progress: poll every couple of seconds so the progress
-            # callback updates live instead of only when a worker exits
+            self._active_futures = []
             try:
-                pending = set(futures)
-                while pending and not self._shutdown_requested:
-                    done, pending = wait(pending, timeout=2)
-
-                    for future in done:
-                        try:
-                            worker_results = future.result()
-                            for key in results:
-                                if key in worker_results:
-                                    results[key] += worker_results[key]
-                        except Exception as e:
-                            logger.error(f"Worker failed: {e}")
-
-                    if progress_callback:
-                        progress_callback(
-                            state_db.get_statistics(since=run_started_utc)
-                        )
-
+                # Two waves: stack representatives (and everything else) first,
+                # then the rest of each stack, which reuses its representative's
+                # analysis. One wave would let a parallel worker analyze a stack
+                # member while its representative is still in flight.
+                for defer_followers in (True, False):
+                    if self._shutdown_requested:
+                        break
+                    self._run_wave(
+                        executor,
+                        force_process,
+                        defer_followers,
+                        results,
+                        state_db,
+                        run_started_utc,
+                        progress_callback,
+                    )
             except KeyboardInterrupt:
                 logger.info("Graceful shutdown requested...")
                 self._shutdown_requested = True
                 executor.shutdown(wait=True)
-                results["interrupted"] = len([f for f in futures if not f.done()])
+                results["interrupted"] = len(
+                    [f for f in self._active_futures if not f.done()]
+                )
 
         # Update session statistics
         state_db.update_session_stats(self.session_id)
@@ -519,6 +534,49 @@ class PhotoProcessor:
         self._restore_signal_handlers()
 
         return results
+
+    def _run_wave(
+        self,
+        executor: ProcessPoolExecutor,
+        force_process: bool,
+        defer_stack_followers: bool,
+        results: Dict[str, Any],
+        state_db: ProcessingStateDB,
+        run_started_utc: str,
+        progress_callback: Optional[Callable],
+    ) -> None:
+        """Run one set of workers until the queue they may claim from is empty."""
+        # Pass only serializable data to workers
+        self._active_futures = futures = [
+            executor.submit(
+                process_worker_function,
+                f"worker_{i}",
+                self.api_key,
+                str(self.inbox_dir),
+                str(self.processed_dir),
+                force_process,
+                defer_stack_followers,
+            )
+            for i in range(self.worker_count)
+        ]
+
+        # Monitor progress: poll every couple of seconds so the progress
+        # callback updates live instead of only when a worker exits
+        pending = set(futures)
+        while pending and not self._shutdown_requested:
+            done, pending = wait(pending, timeout=2)
+
+            for future in done:
+                try:
+                    worker_results = future.result()
+                    for key in results:
+                        if key in worker_results:
+                            results[key] += worker_results[key]
+                except Exception as e:
+                    logger.error(f"Worker failed: {e}")
+
+            if progress_callback:
+                progress_callback(state_db.get_statistics(since=run_started_utc))
 
     def _divert_duplicate(
         self,
@@ -611,7 +669,9 @@ class PhotoProcessor:
                     photo_path,
                     analysis.rating,
                     keywords_to_write(
-                        analysis, TagReviewStorage().get_approved_tag_names()
+                        analysis,
+                        TagReviewStorage().get_approved_tag_names(),
+                        stack_tags(member_context(state_db, filepath)),
                     ),
                     analysis.description,
                     analysis.notes,
